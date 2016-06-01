@@ -8,9 +8,9 @@
 
 ## 技巧のダウンロード
 
-技巧（Windows版）は、以下のリンクから入手可能です。
+技巧（Windows版）は、以下のリンクから入手できます。
 皆様の将棋のご検討などにお役立ていただけますと幸いです。
-- ダウンロード: https://drive.google.com/uc?id=0B98nJjsRgJHNT04tVXVpUF9RZDA&export=download
+- ダウンロード場所: https://github.com/gikou-official/Gikou/releases
 
 技巧の動作環境は、以下のとおりです。
 （新しい技術を使っている関係で、古いパソコンでは動作しない場合もございます。）
