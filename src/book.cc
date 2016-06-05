@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -131,8 +132,7 @@ Move BookMoves::PickRandom() const {
   }
 
   // 4. 候補手が複数存在する場合は、その重要度に応じて、ランダムに定跡手を選択する
-  static std::random_device rd;
-  static std::mt19937 gen(rd());
+  static std::mt19937 gen(std::chrono::system_clock::now().time_since_epoch().count());
   std::uniform_int_distribution<int64_t> dis(0, sum_importance);
   int64_t threashold = dis(gen);
   for (const CandidateMove& candidate : candidates) {
