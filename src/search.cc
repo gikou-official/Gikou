@@ -308,11 +308,6 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
       // 現在までに探索した指し手をソートする
       std::stable_sort(root_moves_.begin(), root_moves_.begin() + pv_index_ + 1,
                        std::greater<RootMove>());
-
-      // ワーカースレッドは、マルチPV探索を行わない
-      if (!is_master_thread()) {
-        break;
-      }
     }
 
     assert(score != kScoreNone);
@@ -1204,7 +1199,7 @@ void Search::SendUsiInfo(const Node& node, int depth, int64_t time,
   std::string buf;
 
   // マルチPVのループ
-  for (int pv_index = 0; pv_index < multipv_; ++pv_index) {
+  for (int pv_index = multipv_ - 1; pv_index >= 0; --pv_index) {
     Score score = root_moves_.at(pv_index).score;
 
     // 1. 評価値とPV以外

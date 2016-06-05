@@ -55,6 +55,7 @@ FixedTimeControl::FixedTimeControl(const Position& position,
     : TimeControl(position, go_options, usi_options) {
   // 常に固定された時間だけ考える
   fixed_time_ = time_per_move() - usi_options["ByoyomiMargin"];
+  fixed_time_ = std::max(fixed_time_, INT64_C(10)); // 不具合を避けるため、思考時間を10ミリ秒未満にしない
 }
 
 DynamicTimeControl::DynamicTimeControl(const Position& position,
@@ -115,6 +116,7 @@ FischerTimeControl::FischerTimeControl(const Position& position,
   // 最小思考時間
   int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
+  minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 
   SYNCED_PRINTF("info string Time Control: base=%" PRIu64 " max=%" PRIu64 " min=%" PRIu64 "\n",
                 base_time_, maximum_time_, minimum_time_);
@@ -139,6 +141,7 @@ ByoyomiTimeControl::ByoyomiTimeControl(const Position& position,
   // 最小思考時間
   int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
+  minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 
   SYNCED_PRINTF("info string Time Control: base=%" PRIu64 " max=%" PRIu64 " min=%" PRIu64 "\n",
                 base_time_, maximum_time_, minimum_time_);
@@ -164,6 +167,7 @@ SuddenDeathTimeControl::SuddenDeathTimeControl(const Position& position,
   // 最小思考時間
   int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
+  minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 
   SYNCED_PRINTF("info string Time Control: base=%" PRIu64 " max=%" PRIu64 " min=%" PRIu64 "\n",
                 base_time_, maximum_time_, minimum_time_);

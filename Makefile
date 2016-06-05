@@ -10,37 +10,37 @@ LIBRARIES = -lpthread
 #
 # 2. Target Specific Settings
 #
-ifeq ($(TARGET),gikou) # executable for Windows
+ifeq ($(TARGET),gikou)        # Windowsの実行ファイル
 	sources  := $(shell ls src/*.cc)
-	CXXFLAGS += -O3 -DNDEBUG -DMINIMUM -static
+	CXXFLAGS += -O3 -DNDEBUG -DMINIMUM -DPSEUDO_RANDOM_DEVICE -static
 endif
-ifeq ($(TARGET),release)
+ifeq ($(TARGET),release)      # Mac / Linuxの実行ファイル
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O3 -DNDEBUG
 endif
-ifeq ($(TARGET),cluster)
+ifeq ($(TARGET),cluster)      # 疎結合並列探索のマスター側（デバッグ用、assertマクロON）
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O3 -DCLUSTER
 endif
-ifeq ($(TARGET),consultation)
+ifeq ($(TARGET),consultation) # 合議アルゴリズムのマスター側（デバッグ用、assertマクロON）
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O3 -DCONSULTATION
 endif
-ifeq ($(TARGET),development)
+ifeq ($(TARGET),development)  # 開発用・デバッグ用
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O2 -g3
 endif
-ifeq ($(TARGET),profile)
+ifeq ($(TARGET),profile)      # プロファイル用
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O3 -DNDEBUG -pg
 endif
-ifeq ($(TARGET),test)
+ifeq ($(TARGET),test)         # ユニットテスト用（Google Testを利用）
 	sources  := $(shell ls src/*.cc test/*.cc test/common/*.cc)
 	sources  += lib/gtest-1.7.0/fused-src/gtest/gtest-all.cc
 	CXXFLAGS += -g3 -Og -DUNIT_TEST
 	INCLUDES += -Isrc -Ilib/gtest-1.7.0/fused-src
 endif
-ifeq ($(TARGET),coverage)
+ifeq ($(TARGET),coverage)     # カバレッジテスト用（Google Testを利用）
 	sources  := $(shell ls src/*.cc test/*.cc test/common/*.cc)
 	sources  += lib/gtest-1.7.0/fused-src/gtest/gtest-all.cc
 	CXXFLAGS += -g3 -DUNIT_TEST -ftest-coverage -fprofile-arcs

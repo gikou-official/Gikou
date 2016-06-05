@@ -86,7 +86,7 @@ class UsiOption {
    * @param max USIオプションの最大値
    */
   UsiOption(int default_value, int min, int max)
-      : value_(default_value),
+      : value_(std::min(std::max(default_value, min), max)),
         default_value_(default_value),
         min_(min),
         max_(max),

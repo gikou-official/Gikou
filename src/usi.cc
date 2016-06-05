@@ -37,7 +37,7 @@
 
 namespace {
 
-const auto kProgramName = "Gikou 20160601";
+const auto kProgramName = "Gikou 20160606";
 const auto kAuthorName  = "Yosuke Demura";
 const auto kBookFile = "book.bin";
 
@@ -306,7 +306,7 @@ UsiOptions::UsiOptions() {
   map_.emplace("DrawScore", UsiOption(0, -200, 200));
 
   // 秒読み時の安全マージン（単位はミリ秒）
-  map_.emplace("ByoyomiMargin", UsiOption(0, 0, 10000));
+  map_.emplace("ByoyomiMargin", UsiOption(100, 0, 10000));
 
   // フィッシャールール時の安全マージン（単位はミリ秒）
   map_.emplace("FischerMargin", UsiOption(12000, 0, 60000));
@@ -315,7 +315,7 @@ UsiOptions::UsiOptions() {
   map_.emplace("SuddenDeathMargin", UsiOption(60, 0, 600));
 
   // 最小思考時間（実際には、ここから安全マージンを引いた時間だけ思考する）（単位はミリ秒）
-  map_.emplace("MinThinkingTime", UsiOption(1000, 1, 60000));
+  map_.emplace("MinThinkingTime", UsiOption(1000, 10, 60000));
 
   // 定跡を使うか否か（trueならば、定跡を用いる）
   map_.emplace("OwnBook", UsiOption(true));

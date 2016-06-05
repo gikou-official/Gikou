@@ -21,6 +21,7 @@
 #define PSQ_H_
 
 #include <cstdlib>
+#include <tmmintrin.h> // SSSE 3
 #include "common/array.h"
 #include "common/arraymap.h"
 #include "common/sequence.h"

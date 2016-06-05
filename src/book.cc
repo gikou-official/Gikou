@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -131,8 +132,15 @@ Move BookMoves::PickRandom() const {
   }
 
   // 4. 候補手が複数存在する場合は、その重要度に応じて、ランダムに定跡手を選択する
+#ifdef PSEUDO_RANDOM_DEVICE
+  // random_deviceの代わりに、現在時刻を用いて乱数生成器を初期化する
+  // （特定の環境では、std::random_deviceが非決定的乱数を返さないがあるため）
+  // 参考: http://en.cppreference.com/w/cpp/numeric/random/random_device
+  static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+#else
   static std::random_device rd;
   static std::mt19937 gen(rd());
+#endif
   std::uniform_int_distribution<int64_t> dis(0, sum_importance);
   int64_t threashold = dis(gen);
   for (const CandidateMove& candidate : candidates) {
@@ -296,15 +304,17 @@ Move Book::GetOneBookMove(const Position& pos, const UsiOptions& usi_options) co
   // 定跡手の中からランダムに１手選ぶ
   const Move book_move = book_moves.PickRandom();
 
-  // 定跡手を評価値が良い順にソートする
+  // 定跡手を評価値が低い順にソートする（「将棋所」で、評価値の高い手を上に表示するため）
   std::sort(book_moves.begin(), book_moves.end(), [](const BookMove& lhs, const BookMove& rhs) {
     return lhs.score == rhs.score
-         ? (lhs.importance > rhs.importance)
-         : lhs.score > rhs.score;
+         ? (lhs.importance < rhs.importance)
+         : lhs.score < rhs.score;
   });
 
   // 定跡データについての情報を出力する
-  int multipv = 0;
+  int multipv = std::count_if(book_moves.begin(), book_moves.end(), [&](const BookMove& bm) {
+    return bm.importance > 0;
+  });
   int book_move_number = 0;
   for (const BookMove& bm : book_moves) {
     if (bm.importance > 0) {
@@ -312,11 +322,12 @@ Move Book::GetOneBookMove(const Position& pos, const UsiOptions& usi_options) co
                     kBookSearchDepth / kOnePly,
                     int(bm.win_count),
                     int(bm.score),
-                    ++multipv,
+                    multipv,
                     bm.move.ToSfen().c_str());
-    }
-    if (bm.move == book_move) {
-      book_move_number = multipv;
+      if (bm.move == book_move) {
+        book_move_number = multipv;
+      }
+      multipv--;
     }
   }
 
