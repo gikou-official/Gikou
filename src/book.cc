@@ -134,7 +134,7 @@ Move BookMoves::PickRandom() const {
   // 4. 候補手が複数存在する場合は、その重要度に応じて、ランダムに定跡手を選択する
 #ifdef PSEUDO_RANDOM_DEVICE
   // random_deviceの代わりに、現在時刻を用いて乱数生成器を初期化する
-  // （特定の環境では、std::random_deviceが非決定的乱数を返さないがあるため）
+  // （特定の環境では、std::random_deviceが非決定的乱数を返さない場合があるため）
   // 参考: http://en.cppreference.com/w/cpp/numeric/random/random_device
   static std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());
 #else
@@ -202,7 +202,7 @@ BookMoves Book::Probe(const Position& pos) const {
       bm.score = -bm.score;
     }
 
-    // ルール上指し手はいけない手はスキップする
+    // 非合法手をスキップする
     // 本来なら合法手しかデータベースに登録されていないはずだが、局面のハッシュ値が衝突する可能性が
     // 一応あるため、このように合法手チェックをいれておいたほうが安全。
     if (!pos.MoveIsLegal(bm.move)) {

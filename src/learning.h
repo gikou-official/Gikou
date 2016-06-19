@@ -102,7 +102,7 @@ ENABLE_ADD_AND_SUBTRACT_OPERATORS(RelativePsq)
  *
  * 具体的は、
  *   - 先手の駒を後手の駒に、後手の駒を先手の駒にする
- *   - 駒の位置を、１８０度回転します
+ *   - 駒の位置を、180度回転する
  * という操作が行われます。
  */
 inline PsqIndex RotatePsqIndex(PsqIndex psq) {

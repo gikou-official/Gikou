@@ -222,7 +222,7 @@ FORCE_INLINE bool TestMoveGivesMate(const Square from, const Square to,
     std::printf("passed condition 3.\n");
   }
 
-  // すべての条件を満たしたら、この指し手により、受け方の玉を詰んでいる
+  // 以上の条件をすべて満たしていたら、この指し手により受け方の玉は詰む
   return true;
 }
 

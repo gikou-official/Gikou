@@ -21,7 +21,7 @@
 #define COMMON_OPERATORS_H_
 
 /**
- * 加算・減算に関する演算子を、一括でオーバーロードするためのマクロです
+ * 加算・減算に関する演算子を、一括でオーバーロードするためのマクロです.
  */
 #define ENABLE_ADD_AND_SUBTRACT_OPERATORS(T)                           \
 constexpr T operator-(T lhs) { return T(-int(lhs)); }                  \
@@ -41,7 +41,7 @@ inline T operator++(T& lhs, int) { T t = lhs; lhs += 1; return t; }    \
 inline T operator--(T& lhs, int) { T t = lhs; lhs -= 1; return t; }
 
 /**
- * 四則演算に関する演算子を、一括でオーバーロードするためのマクロです
+ * 四則演算に関する演算子を、一括でオーバーロードするためのマクロです.
  */
 #define ENABLE_ARITHMETIC_OPERATORS(T)                                 \
 ENABLE_ADD_AND_SUBTRACT_OPERATORS(T)                                   \

@@ -33,8 +33,14 @@
 /**
  * いくつかの整数型または浮動小数点型の変数をまとめて扱うためのクラスです.
  *
- * Streaming SIMD Extensions (SSE) 等を利用して、複数の計算を同時に行うため、
- * 高速化が期待できます。
+ * コンパイラがベクトル拡張に対応している場合は、Streaming SIMD Extensions (SSE) 等を利用して、
+ * 複数の計算を同時に行うため、計算の高速化が期待できます。
+ *
+ * （ベクトル拡張についての参考文献）
+ *   - Free Software Foundation: Using Vector Instructions through Built-in Functions,
+ *     https://gcc.gnu.org/onlinedocs/gcc/Vector-Extensions.html.
+ *   - The Clang Team: Clang Language Extensions,
+ *     http://clang.llvm.org/docs/LanguageExtensions.html.
  */
 template<typename T, int kSize>
 class Pack {
