@@ -16,7 +16,7 @@
 
 技巧の動作環境は、以下のとおりです。
 （新しい技術を使っている関係で、古いパソコンでは動作しない場合もございます。）
-- OS: 64ビット対応OS（Windows 10、Max OS X、Ubuntu Linux 14.04を推奨） 
+- OS: 64ビット対応OS（Windows 7/8/10、Max OS X、Ubuntu Linux 14.04など） 
 - CPU: SSE 4.2 対応のCPU（インテルの Core-i シリーズのCPUを推奨）
 - メモリ: 1GB以上の空きメモリ
 - ディスク: 512MB以上の空きがあるHDD・SSD（SSDのほうが快適です）
