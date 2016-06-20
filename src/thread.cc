@@ -135,6 +135,8 @@ RootMove ThreadManager::ParallelSearch(Node& node, const Score draw_score,
     worker->search_.set_draw_scores(node.side_to_move(), draw_score);
     worker->search_.set_root_moves(root_moves);
     worker->search_.set_multipv(multipv);
+    worker->search_.set_limit_nodes(go_options.nodes);
+    worker->search_.set_limit_depth(go_options.depth);
     worker->search_.PrepareForNextSearch();
     worker->StartSearching();
   }
@@ -144,6 +146,8 @@ RootMove ThreadManager::ParallelSearch(Node& node, const Score draw_score,
   master_search.set_draw_scores(node.side_to_move(), draw_score);
   master_search.set_root_moves(root_moves);
   master_search.set_multipv(multipv);
+  master_search.set_limit_nodes(go_options.nodes);
+  master_search.set_limit_depth(go_options.depth);
   master_search.PrepareForNextSearch();
   master_search.IterativeDeepening(node, *this);
 

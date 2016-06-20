@@ -44,6 +44,12 @@ struct UsiGoOptions {
   /** 時間無制限に考えるならばtrue */
   bool infinite = false;
 
+  /** 探索ノードの制限 */
+  uint64_t nodes = 1152921504606846976ULL;
+
+  /** 探索深度の制限 */
+  int depth = kMaxPly - 1;
+
   /** 通常のαβ探索ではなく、詰み探索を行う場合はtrue */
   bool mate = false;
 
