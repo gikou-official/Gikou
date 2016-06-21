@@ -184,7 +184,7 @@ class UsiProtocol {
   /**
    * goコマンドを解析します.
    */
-  static UsiGoOptions ParseGoCommand(std::istringstream& is, const Position& pos);
+  static UsiGoOptions ParseGoCommand(std::istringstream& is, const Position& pos, UsiOptions* const usi_options);
 
   /**
    * infoコマンドを解析します.

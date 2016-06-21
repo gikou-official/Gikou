@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "synced_printf.h"
+#include "types.h"
 
 std::string UsiInfo::ToString() const {
   std::string str = "info";
@@ -114,7 +115,7 @@ void UsiProtocol::Start() {
       ParsePositionCommand(is, &root_node_);
 
     } else if (type == "go") {
-      UsiGoOptions options = ParseGoCommand(is, root_node());
+      UsiGoOptions options = ParseGoCommand(is, root_node(), &usi_options_);
       OnGoCommandEntered(options);
 
     } else if (type == "stop") {
@@ -193,8 +194,11 @@ void UsiProtocol::ParsePositionCommand(std::istringstream& is,
 }
 
 UsiGoOptions UsiProtocol::ParseGoCommand(std::istringstream& is,
-                                         const Position& pos) {
+                                         const Position& pos,
+                                         UsiOptions* const usi_options) {
   UsiGoOptions options;
+
+  options.depth = (int)(*usi_options)["LimitDepth"];
 
   for (std::string token; is >> token; ) {
     if      (token == "ponder"     ) options.ponder = true;
@@ -203,7 +207,10 @@ UsiGoOptions UsiProtocol::ParseGoCommand(std::istringstream& is,
     else if (token == "byoyomi"    ) is >> options.byoyomi;
     else if (token == "binc"       ) is >> options.inc[kBlack];
     else if (token == "winc"       ) is >> options.inc[kWhite];
-    else if (token == "infinite"   ) options.infinite = true;
+    else if (token == "infinite"   ) {
+      options.infinite = true;
+      options.depth = kMaxPly - 1;
+    }
     else if (token == "nodes"      ) is >> options.nodes;
     else if (token == "depth"      ) is >> options.depth;
     else if (token == "mate"       ) {

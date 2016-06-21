@@ -33,11 +33,12 @@
 #include "search.h"
 #include "synced_printf.h"
 #include "thinking.h"
+#include "types.h"
 #include "usi_protocol.h"
 
 namespace {
 
-const auto kProgramName = "Gikou 20160620";
+const auto kProgramName = "Gikou 20160621";
 const auto kAuthorName  = "Yosuke Demura";
 const auto kBookFile = "book.bin";
 
@@ -226,7 +227,7 @@ void ExecuteCommand(const std::string& command, Node* const node,
     SetRootNode(is, node);
 
   } else if (type == "go") {
-    UsiGoOptions go_options = UsiProtocol::ParseGoCommand(is, *node);
+    UsiGoOptions go_options = UsiProtocol::ParseGoCommand(is, *node, usi_options);
     thinking->StartThinking(*node, go_options);
 
   } else if (type == "stop" || type == "ponderhit" || type == "gameover") {
@@ -334,6 +335,9 @@ UsiOptions::UsiOptions() {
 
   // 勝ち数が少ない定跡を除外する場合はtrue
   map_.emplace("TinyBook", UsiOption(false));
+
+  // 探索深さ制限
+  map_.emplace("LimitDepth", UsiOption(kMaxPly - 1, 1, kMaxPly - 1));
 }
 
 void UsiOptions::PrintListOfOptions() {

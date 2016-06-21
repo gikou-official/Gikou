@@ -2,6 +2,7 @@ BookMaxPly           定跡を何手目まで使うか
 ByoyomiMargin        秒読み時の余裕(ミリ秒)
 DrawScore            千日手の評価値
 FischerMargin        フィッシャールール時の余裕(ミリ秒)
+LimitDepth           探索深さ制限
 MinBookScoreForBlack この評価値未満の先手定跡を回避
 MinBookScoreForWhite この評価値未満の後手定跡を回避
 MinThinkingTime      最小思考時間(ミリ秒)
