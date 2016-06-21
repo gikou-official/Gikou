@@ -110,6 +110,14 @@ class Search {
     multipv_ = std::max(multipv, 1);
   }
 
+  void set_limit_depth(int limit_depth) {
+    limit_depth_ = std::max(std::min(limit_depth, kMaxPly - 1), 1);
+  }
+
+  void set_limit_nodes(uint64_t limit_nodes) {
+    limit_nodes_ = limit_nodes > 1ULL ? limit_nodes : 1ULL;
+  }
+
   std::vector<Move> GetPv() const;
 
   const RootMove& GetBestRootMove() const;
@@ -165,6 +173,8 @@ class Search {
   uint64_t num_nodes_searched_ = 0;
   int max_reach_ply_ = 0;
   int multipv_ = 1, pv_index_ = 0;
+  uint64_t limit_nodes_ = 1152921504606846976ULL;
+  int limit_depth_ = kMaxPly - 1;
   bool learning_mode_ = false;
   Array<Stack, kStackSize> stack_;
   PvTable pv_table_;

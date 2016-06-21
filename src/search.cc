@@ -235,7 +235,7 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
   int64_t last_info_time = 0;
 
   // 反復深化を行う
-  for (int iteration = 1; iteration < kMaxPly; ++iteration) {
+  for (int iteration = 1; iteration <= limit_depth_; ++iteration) {
 
     // ワーカースレッドは、平均して２回に１回、スキップする
     if (!is_master_thread()) {
@@ -339,6 +339,12 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
         || elapsed_time - last_info_time > 100) {
       SendUsiInfo(node, iteration, elapsed_time, nodes);
       last_info_time = elapsed_time;
+    }
+
+    // 探索ノード数の制限チェック
+    if (nodes >= limit_nodes_) {
+      shared_.signals.stop = true; // ワーカースレッドを停止する
+      break;
     }
 
     // 思考時間管理のための統計情報をタイムマネージャーに送る
