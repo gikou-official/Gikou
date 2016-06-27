@@ -48,6 +48,10 @@ namespace {
 void BenchmarkSearch();
 void BenchmarkMoveGeneration(int num_calls);
 void BenchmarkMateSearch(int num_calls, int ply);
+
+// [2016/6/27 追加]ランダムプレーヤーによる１手詰関数のテスト
+void TestMate1ByRandomPlayer();
+
 void CreateBook(const char* output_file_name);
 void ComputeStatsOfGameDatabase(const char* event_name);
 void ComputeAllPossibleQuietMoves();
@@ -77,6 +81,11 @@ void Cli::ExecuteCommand(int argc, char* argv[]) {
   } else if (command == "--bench-mate3") {
     int num_tries = argc >= 3 ? std::atoi(argv[2]) : 1;
     BenchmarkMateSearch(num_tries, 3);
+
+  // [2016/6/27 追加]ランダムプレーヤーによる１手詰関数のテスト
+  } else if (command == "--random-player-mate1") {
+    TestMate1ByRandomPlayer();
+
   } else if (command == "--cluster") {
     Cluster cluster;
     cluster.Start();
@@ -226,6 +235,178 @@ void BenchmarkMateSearch(const int num_calls, const int ply) {
     std::printf("\n");
   }
 }
+
+
+// [2016/6/27 追加]
+/**
+ * ランダムプレーヤーにより１手詰関数のテストを行います.
+ *
+ * （参考文献）
+ *   - やねうら王 on GitHub, https://github.com/yaneurao/YaneuraOu
+ */
+void TestMate1ByRandomPlayer() {
+
+  // 最大5万局、最大256手
+  const int MAX_GAMES = 50000;
+  const int MAX_PLY = 256;
+
+  // 乱数生成器
+  // 同じ局面で繰り返しテストしたいので、seedは固定値にしておく
+  std::mt19937_64 gen(0);
+
+  // １手詰発見回数
+  int cnt_mate_found = 0;
+  // １手詰が発見できなかった回数
+  int cnt_mate_missed = 0;
+  // １手詰関数で詰みではない指し手が生成された回数
+  int cnt_not_mate = 0;
+  // １手詰関数で合法手ではない指し手が生成された回数
+  int cnt_illegal = 0;
+
+  // いずれかのカウンターがインクリメントされたか否かのフラグ
+  bool flg_cntup = false;
+
+
+  // 最大5万局
+  for (int cnt_games = 0; cnt_games < MAX_GAMES; ++cnt_games) {
+    // 初期局面
+    Position pos = Position::CreateStartPosition();
+
+    // 最大256手
+    for (int ply = 0; ply < MAX_PLY; ++ply) {
+      // 合法手を生成する
+      SimpleMoveList<kAllMoves, true> legal_moves1(pos);
+
+      // 合法な指し手がなかった == 詰み
+      if (legal_moves1.size() == 0) {
+        break;
+      }
+
+      // ----- １手詰めのテスト開始
+      flg_cntup = false;
+
+      // 王手のかかっていない局面においてテスト
+      if (!pos.in_check()) {
+
+        // １手詰関数を呼ぶ
+        Move mate_move = kMoveNone;
+        bool isMate1 = IsMateInOnePly(pos, &mate_move);
+
+        // １手詰と判定された場合
+        if (isMate1) {
+          // １手詰の指し手が合法手ではない場合
+          if (!pos.MoveIsLegal(mate_move)) {
+            // １手詰関数で合法手ではない指し手が生成された
+            ++cnt_illegal;
+            flg_cntup = true;
+
+            std::printf("１手詰関数で合法手ではない指し手が生成された：%s\n", mate_move.ToSfen().c_str());
+            std::printf("sfen %s\n", pos.ToSfen().c_str());
+
+            // 必要に応じてコメントアウトを外す
+            //pos.Print(mate_move);
+          }
+
+          // １手詰の指し手が合法手の場合
+          else {
+            // これで本当に詰んでいるのかテストするため、局面を進める
+            pos.MakeMove(mate_move);
+
+            // 合法手を生成する
+            SimpleMoveList<kAllMoves, true> legal_moves2(pos);
+
+            // 合法手が存在する場合（詰みではない場合）
+            if (legal_moves2.size() != 0) {
+              // １手詰関数で詰みではない指し手が生成された
+              ++cnt_not_mate;
+              flg_cntup = true;
+
+              // 局面を戻してから指し手を表示しないと目視で確認できない。
+              pos.UnmakeMove(mate_move);
+
+              std::printf("１手詰関数で詰みではない指し手が生成された：%s\n", mate_move.ToSfen().c_str());
+              std::printf("sfen %s\n", pos.ToSfen().c_str());
+
+              // 必要に応じてコメントアウトを外す
+              //pos.Print(mate_move);
+            }
+
+            // 合法手が存在しない場合（詰みの場合）
+            else {
+              // １手詰発見
+              ++cnt_mate_found;
+              flg_cntup = true;
+
+              // 局面を戻す
+              pos.UnmakeMove(mate_move);
+            }
+          }
+        }
+
+        // １手詰と判定されなかった場合
+        else {
+          // １手詰め判定で漏れた局面を探す
+          for (ExtMove ext_move : SimpleMoveList<kAllMoves, true>(pos)) {
+            // 局面を進める
+            Move move = ext_move.move;
+            pos.MakeMove(move);
+
+            // 合法手を生成する
+            SimpleMoveList<kAllMoves, true> legal_moves2(pos);
+
+            // 合法手が存在しない場合（詰みの場合）
+            // ただし、打ち歩詰めを除く
+            if (legal_moves2.size() == 0 && !move.is_pawn_drop()) {
+              // １手詰が発見できなかった（１手詰め判定されなかったが実際には詰みがある）
+              ++cnt_mate_missed;
+              flg_cntup = true;
+
+              // 局面を戻す
+              pos.UnmakeMove(move);
+
+              std::printf("１手詰め判定されなかったが実際には詰みがある：%s\n", move.ToSfen().c_str());
+              std::printf("sfen %s\n", pos.ToSfen().c_str());
+
+              // 必要に応じてコメントアウトを外す
+              //pos.Print(move);
+
+              // 次の指し手へ進む
+              break;
+            }
+
+            // 局面を戻す
+            pos.UnmakeMove(move);
+          }
+
+        }
+      }
+
+      // 統計情報の表示
+      if (flg_cntup) {
+        int cnt_test = cnt_mate_found + cnt_mate_missed + cnt_not_mate + cnt_illegal;
+        if (cnt_test % 10000 == 0) {
+          std::printf("-----\n");
+          std::printf("試行回数：%d\n", cnt_test);
+          std::printf("１手詰発見率：%.4f%%\n", 100.0f * cnt_mate_found / cnt_test);
+          std::printf("１手詰発見回数：%d\n", cnt_mate_found);
+          std::printf("１手詰が発見できなかった回数：%d\n", cnt_mate_missed);
+          std::printf("１手詰関数で詰みではない指し手が生成された回数：%d\n", cnt_not_mate);
+          std::printf("１手詰関数で合法手ではない指し手が生成された回数：%d\n", cnt_illegal);
+          std::printf("-----\n");
+        }
+      }
+
+      // ----- １手詰めのテスト終了
+
+      // 生成された指し手のなかからランダムに選び、その指し手で局面を進める。
+      std::uniform_int_distribution<uint64_t> dis(0, legal_moves1.size() - 1);
+      Move move = legal_moves1.begin()[dis(gen)].move;
+
+      pos.MakeMove(move);
+    }
+  }
+}
+
 
 /**
  * 定跡DBファイルを作成します.

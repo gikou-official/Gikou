@@ -157,8 +157,13 @@ FORCE_INLINE bool TestMoveGivesMate(const Square from, const Square to,
     Bitboard max_attacks = max_attacks_bb(Piece(kColor, kPtAfterMove), to);
     max_attacks |= direction_bb(ksq, attack1);
     if (long_controls.any()) { // TODO speed up
-      max_attacks |= max_attacks_bb(kBlackRook  , to);
-      max_attacks |= max_attacks_bb(kBlackBishop, to);
+      // [2016/6/27 修正箇所1]max_attacksに加える飛車・角の利きについて、移動先からの利きではなく、移動元からの利きに修正
+      // （例）sfen 4pp1n1/2G+NL1PkP/2s1s3l/gg2g3p/P1pp1+bp1b/Lp1P3p+n/N3RSK2/5+s1+p1/2R3+p2 w L4p 1
+      //       → １手詰「2f2g+」を発見できるようになった
+      //max_attacks |= max_attacks_bb(kBlackRook  , to);
+      //max_attacks |= max_attacks_bb(kBlackBishop, to);
+      max_attacks |= max_attacks_bb(kBlackRook  , from);
+      max_attacks |= max_attacks_bb(kBlackBishop, from);
     }
 
     // 受け方の玉の逃げ道を、攻め方の利きによって塞ぐことができなければ、この手では詰まない
@@ -180,14 +185,25 @@ FORCE_INLINE bool TestMoveGivesMate(const Square from, const Square to,
   Bitboard to_bb   = square_bb(to);
   Bitboard new_occ = occ.andnot(from_bb) | to_bb;
 
+  // [2016/6/27 修正箇所2]受け方の玉を除外しないnew_occ（new_occ2）を作成（下記「修正箇所4」で使用）
+  Bitboard new_occ2 = pos.pieces().andnot(from_bb) | to_bb;
+
   // 条件 1. 移動先のマスに、受け方の利きがないこと
-  if (kPt == kKnight) {
+  // [2016/6/27 修正箇所3]桂馬が成る場合を考慮
+  // （例）sfen +L3b2n+N/r4+B3/+P1kg3Pp/P2P2Pp1/1PrSPP2P/2lgG1pnN/+pG1l1+pS2/+p1P6/4SK1+lS w 2P 1
+  //       → １手詰「2f3h+」を発見できるようになった
+  //if (kPt == kKnight) {
+  if (kPt == kKnight && !kIsPromotion) {
     if (pos.AttackersTo<~kColor>(to, new_occ).any()) {
       return false;
     }
   } else {
     // 飛び駒以外の駒の利きは、すでにStep 1.で考慮されているので、ここではチェックしなくてよい
-    if (pos.SlidersAttackingTo(to, new_occ, ~kColor).any()) {
+    // [2016/6/27 修正箇所4]受け方の玉を除外しないnew_occ（new_occ2）を使用する
+    // （例）sfen 4rk3/l+N4p1+N/4SNPN1/pb2p1G1P/s1pPL2R1/1b2PpSpG/+p+p3G1P+p/+s4lK1G/+p+pP5L b p 1
+    //       → １手詰「2c3a+」を発見できるようになった
+    //if (pos.SlidersAttackingTo(to, new_occ, ~kColor).any()) {
+    if (pos.SlidersAttackingTo(to, new_occ2, ~kColor).any()) {
       return false;
     }
   }
@@ -196,10 +212,11 @@ FORCE_INLINE bool TestMoveGivesMate(const Square from, const Square to,
   }
 
   // 条件 2. 受け方の玉が逃げられるマスがないこと
-  Bitboard old_short_attacks = attacks;
-  if (Piece(kColor, kPt).is_slider()) {
-    old_short_attacks &= neighborhood8_bb(from);
-  }
+  // [2016/6/27 修正箇所5]old_short_attacksは使用されていないので、コメントアウト
+  //Bitboard old_short_attacks = attacks;
+  //if (Piece(kColor, kPt).is_slider()) {
+  //  old_short_attacks &= neighborhood8_bb(from);
+  //}
   Bitboard min_attacks = attacks_from<kColor, kPtAfterMove>(to, new_occ) | to_bb;
   Bitboard max_evasions = neighborhood8_bb(ksq).andnot(min_attacks | pos.pieces(~kColor));
   while (max_evasions.any()) {
