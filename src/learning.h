@@ -218,7 +218,7 @@ struct ExtendedParamsBase {
   }
 
   /**
-   * KPについて、次元下げを行います.
+   * PPについて、次元下げを行います.
    */
   template<Color kColor, typename Operation>
   Operation EachPP(const PsqIndex idx1, const PsqIndex idx2, Operation op) {
