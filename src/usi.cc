@@ -87,7 +87,9 @@ void ReceiveCommands(CommandQueue* const queue, Thinking* const thinking) {
   assert(thinking != nullptr);
 
   // 標準入力から1行ずつ読み込む
-  for (std::string command; std::getline(std::cin, command);) {
+  for (std::string command; ;) {
+    if (!std::getline(std::cin, command))
+      command = "quit";
     std::istringstream is(command);
     std::string type;
     is >> type;
