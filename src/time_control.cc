@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -101,20 +101,31 @@ FischerTimeControl::FischerTimeControl(const Position& position,
                                        const UsiOptions& usi_options)
     : DynamicTimeControl(position, go_options, usi_options) {
   // 時間制御を調整するためのパラメータ
-  const int64_t kHorizon = 45;
+  const int64_t kHorizon = 35;
   const int64_t kMaxRatio = 5;
   const int64_t kMinRatio = 3;
 
-  // 目標思考時間の基礎となる時間
+  int64_t game_ply = position.game_ply();
   int64_t fischer_margin = usi_options_["FischerMargin"];
+  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
+
+  // 目標思考時間の基礎となる時間
   int64_t remaining = std::max(INT64_C(0), remaining_time() - fischer_margin);
   base_time_ = (remaining / kHorizon) + time_per_move();
+
+  // 序盤の消費時間を削減する
+  if (game_ply < 20) {
+    double time_reduction = (game_ply + 1.0) / 20.0;
+    double new_base_time = base_time_ * time_reduction;
+    base_time_ = static_cast<int64_t>(new_base_time);
+    base_time_ = std::max(base_time_, min_thinking_time); // 最小思考時間を下回らないようにする
+    base_time_ = std::max(base_time_, INT64_C(10)); // 不具合を避けるため、10ミリ秒未満にはしない
+  }
 
   // 最大思考時間
   maximum_time_ = std::min(base_time_ * kMaxRatio, remaining) - byoyomi_margin_;
 
   // 最小思考時間
-  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
   minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 
@@ -131,15 +142,26 @@ ByoyomiTimeControl::ByoyomiTimeControl(const Position& position,
   const int64_t kMaxRatio = 5;
   const int64_t kMinRatio = 3;
 
+  int64_t game_ply = position.game_ply();
+  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
+
   // 目標思考時間の基礎となる時間
   int64_t remaining = std::max(INT64_C(0), remaining_time());
   base_time_ = (remaining / kHorizon) + time_per_move();
+
+  // 序盤の消費時間を削減する
+  if (game_ply < 20) {
+    double time_reduction = (game_ply + 1.0) / 20.0;
+    double new_base_time = base_time_ * time_reduction;
+    base_time_ = static_cast<int64_t>(new_base_time);
+    base_time_ = std::max(base_time_, min_thinking_time); // 最小思考時間を下回らないようにする
+    base_time_ = std::max(base_time_, INT64_C(10)); // 不具合を避けるため、10ミリ秒未満にはしない
+  }
 
   // 最大思考時間
   maximum_time_ = std::min(base_time_ * kMaxRatio, remaining) - byoyomi_margin_;
 
   // 最小思考時間
-  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
   minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 
@@ -156,16 +178,27 @@ SuddenDeathTimeControl::SuddenDeathTimeControl(const Position& position,
   const int64_t kMaxRatio = 5;
   const int64_t kMinRatio = 3;
 
+  int64_t game_ply = position.game_ply();
+  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
+
   // 目標思考時間の基礎となる時間
   int64_t sudden_death_margin = INT64_C(1000) * usi_options["SuddenDeathMargin"]; // 秒単位に変換
   int64_t remaining = std::max(INT64_C(0), remaining_time() - sudden_death_margin);
   base_time_ = std::max(INT64_C(1), remaining / kHorizon);
 
+  // 序盤の消費時間を削減する
+  if (game_ply < 20) {
+    double time_reduction = (game_ply + 1.0) / 20.0;
+    double new_base_time = base_time_ * time_reduction;
+    base_time_ = static_cast<int64_t>(new_base_time);
+    base_time_ = std::max(base_time_, min_thinking_time); // 最小思考時間を下回らないようにする
+    base_time_ = std::max(base_time_, INT64_C(10)); // 不具合を避けるため、10ミリ秒未満にはしない
+  }
+
   // 最大思考時間
   maximum_time_ = std::min(base_time_ * kMaxRatio, remaining) - byoyomi_margin_;
 
   // 最小思考時間
-  int64_t min_thinking_time = usi_options_["MinThinkingTime"];
   minimum_time_ = std::max(base_time_ / kMinRatio, min_thinking_time) - byoyomi_margin_;
   minimum_time_ = std::max(minimum_time_, INT64_C(10)); // 不具合を避けるため、最小思考時間を10ミリ秒未満にしない
 

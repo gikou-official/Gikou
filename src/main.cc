@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -23,6 +23,7 @@
 #include "consultation.h"
 #include "evaluation.h"
 #include "extended_board.h"
+#include "huffman_code.h"
 #include "mate1ply.h"
 #include "material.h"
 #include "move_probability.h"
@@ -43,6 +44,7 @@ int main(int argc, char **argv) {
   Bitboard::Init();
   ExtendedBoard::Init();
   Zobrist::Init();
+  HuffmanCode::Init();
   InitMateInOnePly();
   Search::Init();
   PsqPair::Init();

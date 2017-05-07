@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -66,6 +66,10 @@ class Position {
   // 比較演算子のオーバーロード
   bool operator==(const Position& rhs) const;
   bool operator!=(const Position& rhs) const;
+
+  // ビットボードをまとめてコピーするためのアクセサ
+  const ArrayMap<Bitboard, Color>& color_bb() const;
+  const ArrayMap<Bitboard, PieceType>& type_bb() const;
 
   /**
    * 盤上のすべての駒を返します.
@@ -297,6 +301,13 @@ class Position {
   Move move_before_n_ply(unsigned ply) const;
 
   /**
+   * 開始局面から現局面までの手数を返します.
+   *
+   * 開始局面の場合は、まだ何も手を指していないので、ゼロを返します.
+   */
+  int game_ply() const;
+
+  /**
    * 指し手が合法手であれば、trueを返します.
    */
   bool MoveIsLegal(Move move) const;
@@ -487,6 +498,14 @@ class Position {
   ArrayMap<int, PieceType> num_unused_pieces_;
 };
 
+inline const ArrayMap<Bitboard, Color>& Position::color_bb() const {
+  return color_bb_;
+}
+
+inline const ArrayMap<Bitboard, PieceType>& Position::type_bb() const {
+  return type_bb_;
+}
+
 inline Bitboard Position::pieces() const {
   return occupied_bb_;
 }
@@ -659,6 +678,10 @@ inline Move Position::move_before_n_ply(unsigned ply) const {
   assert(ply >= 1);
   size_t size = current_state_info_ - state_infos_.begin() + 1;
   return ply < size ? (current_state_info_ - ply + 1)->last_move : kMoveNone;
+}
+
+inline int Position::game_ply() const {
+  return static_cast<int>(current_state_info_ - state_infos_.begin());
 }
 
 inline bool Position::PseudoLegalMoveIsLegal(Move move) const {

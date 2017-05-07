@@ -1,13 +1,13 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * The Search class below is derived from Stockfish 7.
  * Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
  * Copyright (C) 2008-2015 Marco Costalba, Joona Kiiski, Tord Romstad (Stockfish author)
  * Copyright (C) 2015-2016 Marco Costalba, Joona Kiiski, Gary Linscott, Tord Romstad (Stockfish author)
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 
 #include <atomic>
 #include <vector>
+#include <utility>
 #include "common/array.h"
 #include "common/arraymap.h"
 #include "move.h"
@@ -56,6 +57,7 @@ class Search {
     Array<Move, 2> killers;
     Move hash_move;
     Move current_move;
+    HistoryStats* countermoves_history;
     Move excluded_move;
     Depth reduction;
     Score static_score;
@@ -84,6 +86,14 @@ class Search {
   Score AlphaBetaSearch(Node& node, Score alpha, Score beta, Depth depth);
   Score NullWindowSearch(Node& node, Score alpha, Score beta, Depth depth);
 
+  /**
+   * シンプルな反復深化探索を行います.
+   * 主に教師局面の生成に用いることを想定しています.
+   * @param pos 探索を行う局面
+   * @return 最善手と評価値のペア
+   */
+  std::pair<Move, Score> SimpleIterativeDeepening(const Position& pos);
+
   template<NodeType kNodeType>
   Score MainSearch(Node& node, Score alpha, Score beta, Depth depth, int ply,
                    bool cut_node);
@@ -108,6 +118,14 @@ class Search {
 
   void set_multipv(int multipv) {
     multipv_ = std::max(multipv, 1);
+  }
+
+  void set_nodes_limit(uint64_t nodes) {
+    nodes_limit_ = nodes;
+  }
+
+  void set_depth_limit(int depth_limit) {
+    depth_limit_ = std::min(std::max(depth_limit, 1), kMaxPly);
   }
 
   std::vector<Move> GetPv() const;
@@ -174,6 +192,9 @@ class Search {
   MovesStats followupmoves_;
   GainsStats gains_;
   std::vector<RootMove> root_moves_;
+
+  int depth_limit_ = kMaxPly;
+  uint64_t nodes_limit_ = UINT64_MAX;
 
   const size_t thread_id_;
 };

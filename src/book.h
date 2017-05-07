@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -36,13 +36,26 @@ class UsiOptions;
  */
 class OpeningStrategy {
  public:
+  /**
+   * 対応している戦型の数
+   */
+  static constexpr int kNumStrategies = 9;
+
   explicit constexpr OpeningStrategy(int id = 0) : id_(id) {}
 
   /**
    * この戦型のIDを返します.
-   * @return 戦型のID（0から31までの整数値）
+   * @return 戦型のID（0から8までの整数値）
    */
   operator int() const {
+    return id_;
+  }
+
+  /**
+   * この戦型のIDを返します.
+   * @return 戦型のID（0から8までの整数値）
+   */
+  int id() const {
     return id_;
   }
 
@@ -56,14 +69,14 @@ class OpeningStrategy {
 
   /**
    * 戦型の日本語名に対応する、OpeningStrategyのオブジェクトを返します.
-   * @param japanese_name 戦型の日本語名（"矢倉", "四間飛車"など、全32種に対応）
+   * @param japanese_name 戦型の日本語名（"矢倉", "四間飛車"など、全9種に対応）
    * @return 指定した日本語名に対応するオブジェクト（該当する戦型が見つからないときは、"その他の戦型"）
    */
   static OpeningStrategy of(const std::string& japanese_name);
 
   /**
     * 戦型の日本語名に対応する、OpeningStrategyのオブジェクトを返します.
-    * @param japanese_name 戦型の日本語名（"矢倉", "四間飛車"など、全32種に対応）
+    * @param japanese_name 戦型の日本語名（"矢倉", "四間飛車"など、全9種に対応）
     * @return 指定した日本語名に対応するオブジェクト（該当する戦型が見つからないときは、"その他の戦型"）
     */
   static OpeningStrategy of(std::string&& japanese_name) {
@@ -76,23 +89,28 @@ class OpeningStrategy {
    * 範囲for文に渡すのに便利です。
    * @return 全戦型を要素とする擬似コンテナ
    */
-  static BitSet<OpeningStrategy, 32, uint32_t> all_strategies() {
-    return BitSet<OpeningStrategy, 32, uint32_t>().set();
+  static BitSet<OpeningStrategy, kNumStrategies, uint32_t> all_strategies() {
+    return BitSet<OpeningStrategy, kNumStrategies, uint32_t>().set();
   }
 
-  static constexpr OpeningStrategy min() { return OpeningStrategy( 0); }
-  static constexpr OpeningStrategy max() { return OpeningStrategy(31); }
+  static constexpr OpeningStrategy min() {
+    return OpeningStrategy(0);
+  }
+
+  static constexpr OpeningStrategy max() {
+    return OpeningStrategy(kNumStrategies - 1);
+  }
 
  private:
   int id_;
-  static Array<std::string, 32> japanese_names_;
+  static Array<std::string, kNumStrategies> japanese_names_;
 };
 
 /**
  * 戦型のビットセットです.
  * １つの指し手が複数の戦型に属するということがありえるので、BitSetを使うのが便利です。
  */
-typedef BitSet<OpeningStrategy, 32, uint32_t> OpeningStrategySet;
+typedef BitSet<OpeningStrategy, OpeningStrategy::kNumStrategies, uint32_t> OpeningStrategySet;
 
 /**
  * 定跡手１手を表します.
@@ -224,9 +242,11 @@ class Book {
   void SearchAllBookMoves();
 
   /**
-   * 棋譜から定跡データを作成します.
+   * 棋譜から定跡データベースを作成します.
+   * @param opening_strategies 定跡データベースの作成時に、作成対象とする戦型を指定します
+   * @return 作成された定跡データベース
    */
-  static Book CreateBook();
+  static Book CreateBook(const OpeningStrategySet& opening_strategies);
 
  private:
   /**

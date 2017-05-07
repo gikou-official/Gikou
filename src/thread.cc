@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -122,19 +122,18 @@ uint64_t ThreadManager::CountNodesUnder(Move move) const {
 }
 
 RootMove ThreadManager::ParallelSearch(Node& node, const Score draw_score,
-                                       const UsiGoOptions& go_options,
-                                       const int multipv) {
-  // goコマンドのsearchmovesとignoremovesオプションから、
-  // ルート局面で探索すべき手を列挙する
-  const std::vector<RootMove> root_moves = Search::CreateRootMoves(
-      node, go_options.searchmoves, go_options.ignoremoves);
-
+                                       const std::vector<RootMove>& root_moves,
+                                       int multipv,
+                                       int depth_limit,
+                                       uint64_t nodes_limit) {
   // ワーカースレッドの探索を開始する
   for (std::unique_ptr<SearchThread>& worker : worker_threads_) {
     worker->SetRootNode(node);
     worker->search_.set_draw_scores(node.side_to_move(), draw_score);
     worker->search_.set_root_moves(root_moves);
     worker->search_.set_multipv(multipv);
+    worker->search_.set_depth_limit(depth_limit);
+    worker->search_.set_nodes_limit(nodes_limit);
     worker->search_.PrepareForNextSearch();
     worker->StartSearching();
   }
@@ -144,6 +143,8 @@ RootMove ThreadManager::ParallelSearch(Node& node, const Score draw_score,
   master_search.set_draw_scores(node.side_to_move(), draw_score);
   master_search.set_root_moves(root_moves);
   master_search.set_multipv(multipv);
+  master_search.set_depth_limit(depth_limit);
+  master_search.set_nodes_limit(nodes_limit);
   master_search.PrepareForNextSearch();
   master_search.IterativeDeepening(node, *this);
 

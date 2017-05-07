@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -32,6 +32,143 @@ Book g_book;
 
 }
 
+void MinimaxNode::Split(const std::vector<std::string>& split_moves) {
+  assert(is_leaf_node() && ignoremoves_.empty()); // この場合のみ分割できる
+
+  if (split_moves.empty()) {
+    return;
+  }
+
+  // 上位N手は、１手につき１ノードを割り当てる
+  for (std::string move : split_moves) {
+    child_nodes_.emplace_back(new MinimaxNode());
+    MinimaxNode& child = *child_nodes_.back();
+    child.parent_ = this;
+    child.root_position_sfen_ = root_position_sfen_;
+    child.path_from_root_ = path_from_root_;
+    child.path_from_root_.push_back(move);
+  }
+
+  // その他すべての手は、最後のノードにまとめて割り当てる
+  {
+    child_nodes_.emplace_back(new MinimaxNode());
+    MinimaxNode& child = *child_nodes_.back();
+    child.parent_ = this;
+    child.root_position_sfen_ = root_position_sfen_;
+    child.path_from_root_ = path_from_root_;
+    child.ignoremoves_ = split_moves;
+  }
+}
+
+void MinimaxNode::RegisterAllLeafNodes(std::vector<MinimaxNode*>* leaf_nodes) {
+  assert(leaf_nodes != nullptr);
+
+  if (is_leaf_node()) {
+    // a. リーフノードの場合: 自分自身を登録して終了する
+    leaf_nodes->push_back(this);
+  } else {
+    // b. 内部ノードの場合: 子ノードのリーフノードを全て登録する
+    for (std::unique_ptr<MinimaxNode>& child : child_nodes_) {
+      child->RegisterAllLeafNodes(leaf_nodes);
+    }
+  }
+}
+
+std::string MinimaxNode::GetPositionCommand() const {
+  assert(is_leaf_node()); // 直接ワーカーが割り当てられているノード（リーフノード）のみが対象
+
+  if (path_from_root_.empty()) {
+    return root_position_sfen_;
+  } else {
+    std::string command = root_position_sfen_;
+    if (root_position_sfen_.find("moves") == std::string::npos) {
+      command += " moves";
+    }
+    for (std::string move : path_from_root_) {
+      command += " " + move;
+    }
+    return command;
+  }
+}
+
+std::string MinimaxNode::GetGoCommand() const {
+  assert(is_leaf_node()); // 直接ワーカーが割り当てられているノード（リーフノード）のみが対象
+
+  std::string command = "go infinite";
+  if (!ignoremoves_.empty()) {
+    command += " ignoremoves";
+    for (const std::string& move : ignoremoves_) {
+      command += " " + move;
+    }
+  }
+  return command;
+}
+
+void MinimaxNode::UpdateMinimaxTree() {
+  //
+  // Step 1. usi_info_を更新する
+  //
+  if (!is_leaf_node()) {
+    int best_child_id = 0;
+    int max_seldepth = 0;
+    Score best_score = -kScoreInfinite - 1;
+    int64_t total_nps = 0, total_nodes = 0;
+
+    // 最善手、最善手の評価値、最大seldepth、合計NPS、合計ノード数を求める
+    for (size_t child_id = 0; child_id < child_nodes_.size(); ++child_id) {
+      const std::unique_ptr<MinimaxNode>& child = child_nodes_.at(child_id);
+      const UsiInfo& child_info = child->usi_info_;
+
+      // 子ノードの評価値を取得する
+      Score child_score = child_info.score;
+      if (child->ignoremoves_.empty()) {
+        // ignoremovesが指定されていなければ、相手の手番なので、評価値を反転する
+        child_score = -child_score;
+      }
+
+      // 子ノードで最大の評価値を更新する
+      if (child_score > best_score) {
+        best_score = child_score;
+        best_child_id = child_id;
+      }
+
+      // 子ノードで最大の評価値を更新する
+      max_seldepth = std::max(max_seldepth, child_info.seldepth);
+      total_nps += child_info.nps;
+      total_nodes += child_info.nodes;
+    }
+
+    // 最善手の情報を取得する
+    const UsiInfo& best_node_info = child_nodes_.at(best_child_id)->usi_info_;
+
+    // このノードの情報を更新する
+    usi_info_.depth    = best_node_info.depth;
+    usi_info_.seldepth = max_seldepth;
+    usi_info_.time     = best_node_info.time;
+    usi_info_.nodes    = total_nodes;
+    usi_info_.score    = best_score;
+    usi_info_.hashfull = best_node_info.hashfull;
+    usi_info_.nps      = total_nps;
+    usi_info_.pv       = best_node_info.pv;
+  }
+
+  //
+  // Step 2. 親ノードに遡って、ミニマックス木を更新する（再帰的処理）
+  //
+  if (parent_ != nullptr) {
+    parent_->UpdateMinimaxTree();
+  }
+}
+
+void MinimaxNode::Reset() {
+  parent_ = nullptr;
+  child_nodes_.clear();
+  usi_info_ = UsiInfo();
+  root_position_sfen_.clear();
+  path_from_root_.clear();
+  ignoremoves_.clear();
+}
+
 ClusterWorker::ClusterWorker(size_t worker_id, Cluster& cluster)
     : worker_id_(worker_id),
       cluster_(cluster) {
@@ -61,7 +198,7 @@ void ClusterWorker::Initialize() {
     // b. ワーカーの起動
     std::string worker_name = "worker-" + std::to_string(worker_id_);
     char* const args[] = {
-#if 0
+#if 1
         // リモートマシンをワーカーとして使用する場合: SSHで通信する
         const_cast<char*>("ssh"),
         const_cast<char*>(worker_name.c_str()), // ~/.ssh/configでワーカーのホスト名を設定しておく
@@ -113,7 +250,7 @@ Cluster::Cluster()
 
 void Cluster::OnIsreadyCommandEntered() {
   // 定跡ファイルを読み込む
-  g_book.ReadFromFile("book.bin");
+  g_book.ReadFromFile(usi_options()["BookFile"].string().c_str());
 
   // ワーカを必要なだけ起動する
   if (workers_.empty()) {
@@ -150,11 +287,11 @@ void Cluster::OnUsinewgameCommandEntered() {
 
 void Cluster::OnGoCommandEntered(const UsiGoOptions& go_options) {
   // 上位N手を調べるための浅い探索に用いる時間（ミリ秒で指定）
-  const int kShallowSearchTime = 300; // 2015年版YSSと同じ設定
+  const int kPresearchTime = 300; // 2015年版YSSと同じ設定
 
   // 1. 合法手の数を調べる
   SimpleMoveList<kAllMoves, true> legal_moves(root_node());
-  size_t num_legal_moves = legal_moves.size();
+  int num_legal_moves = legal_moves.size();
 
   // 2. 合法手の数が１手以下であれば、探索は不要
   if (num_legal_moves == 0) {
@@ -177,37 +314,17 @@ void Cluster::OnGoCommandEntered(const UsiGoOptions& go_options) {
     }
   }
 
-  std::string ignoremoves = "";
-  std::vector<bool> busy_workers(workers_.size(), false);
-  worker_infos_.clear();
-  worker_infos_.resize(workers_.size());
-
-  // 4. 相手の指し手の予想が当たった場合は、前回のPVの手を優先的にワーカーに割り当てる
-  const bool prediction_hit = (position_sfen() == predicted_position_);
-  if (prediction_hit) {
-    // なるべく前回探索時と同じワーカーに割り当てる
-    size_t worker_id = previous_best_worker_ != master_worker_id() ? previous_best_worker_ : 0;
-    std::unique_ptr<ClusterWorker>& worker = workers_.at(worker_id);
-    SYNCED_PRINTF("info string prediction hit! %zu %s\n", worker_id,
-                  predicted_move_.c_str());
-    // ワーカーに探索の指示を出す
-    worker->SendCommand(position_sfen().c_str());
-    worker->SendCommand("go infinite searchmoves %s", predicted_move_.c_str());
-    worker->ExecuteTask();
-    busy_workers.at(worker_id) = true;
-    ignoremoves += " " + predicted_move_;
-  }
-
-  // 5. MultiPV探索を行い、ワーカを割り当てる指し手を決める
-  size_t multipv = std::min(num_legal_moves, workers_.size()) - (prediction_hit ? 2 : 1);
+  // 4. MultiPV探索を行い、ワーカを割り当てる指し手を決める
+  int kMaxSplitAtRoot = 8;
+  size_t multipv = std::min(num_legal_moves, kMaxSplitAtRoot - 1);
   std::vector<UsiInfo> presearch_infos(multipv);
   ClusterWorker& master = master_worker();
-  if (multipv > 0) {
+  if (multipv >= 1) {
     // MultiPV探索の指示を出す
     master.SendCommand("setoption name OwnBook value false");
     master.SendCommand("setoption name MultiPV value %zu", multipv);
     master.SendCommand(position_sfen().c_str());
-    master.SendCommand("go byoyomi %d ignoremoves%s", kShallowSearchTime, ignoremoves.c_str());
+    master.SendCommand("go byoyomi %d", kPresearchTime);
     // infoコマンドを受信して、上位の手を調べる
     for (std::string line; master.RecieveCommand(&line); ) {
       std::istringstream is(line);
@@ -216,8 +333,8 @@ void Cluster::OnGoCommandEntered(const UsiGoOptions& go_options) {
       if (token == "info") {
         UsiInfo info = ParseInfoCommand(is);
         if (info.multipv >= 1) {
-          // presearch_infosは、後でうしろから取り出すので、良い手ほどうしろに保存する
-          presearch_infos.at(multipv - info.multipv) = info;
+          // multipvは、配列の添字（0から始まる）と異なり、1から始まるので、1を引く
+          presearch_infos.at(info.multipv - 1) = info;
         }
       } else if (token == "bestmove") {
         break;
@@ -227,30 +344,47 @@ void Cluster::OnGoCommandEntered(const UsiGoOptions& go_options) {
     master.SendCommand("setoption name MultiPV value 1");
   }
 
-  // 6. MultiPV探索でヒップアップされた上位の手については、それぞれ１台のワーカに割り当てる
-  for (size_t worker_id = 0; !presearch_infos.empty(); ++worker_id) {
-    // マスター及び既に探索中のワーカーはスキップする
-    if (worker_id == master_worker_id() || busy_workers.at(worker_id)) {
-      continue;
+  // 5. MultiPV探索で得られた情報を元に、探索木を構築する
+  root_of_minimax_tree_.Reset();
+  root_of_minimax_tree_.set_root_position_sfen(position_sfen());
+  leaf_nodes_.clear();
+  // a. 深さ１: ルートを最大８分割する
+  {
+    std::vector<std::string> split_moves;
+    for (const UsiInfo& info : presearch_infos) {
+      split_moves.push_back(info.pv.at(0));
     }
-    // ワーカーに探索の指示を出す
-    const std::vector<std::string>& pv = presearch_infos.back().pv;
-    std::unique_ptr<ClusterWorker>& worker = workers_.at(worker_id);
-    if (!pv.empty()) {
-      worker->SendCommand(position_sfen().c_str());
-      worker->SendCommand("go infinite searchmoves %s", pv.front().c_str());
-      worker->ExecuteTask();
-      busy_workers.at(worker_id) = true;
-      ignoremoves += " " + pv.front();
-    }
-    presearch_infos.pop_back();
+    root_of_minimax_tree_.Split(split_moves);
   }
+  // b. 深さ２: 上位７手については、更に２分割する
+  for (size_t i = 0; i < presearch_infos.size(); ++i) {
+    const std::vector<std::string>& pv = presearch_infos.at(i).pv;
+    if (pv.size() >= 2) {
+      MinimaxNode& child = root_of_minimax_tree_.GetChild(i);
+      std::vector<std::string> split_moves{pv.at(1)};
+      child.Split(split_moves);
+    }
+  }
+  // c. 深さ３: 最善手については、更に２分割する
+  {
+    const std::vector<std::string>& pv = presearch_infos.front().pv;
+    if (pv.size() >= 3) {
+      MinimaxNode& grandchild = root_of_minimax_tree_.GetChild(0).GetChild(0);
+      std::vector<std::string> split_moves{pv.at(2)};
+      grandchild.Split(split_moves);
+    }
+  }
+  root_of_minimax_tree_.RegisterAllLeafNodes(&leaf_nodes_);
+  assert(leaf_nodes_.size() <= workers_.size());
 
-  // 7. 残りの手については、まとめてマスターに割当てる
-  assert(ignoremoves != "");
-  master.SendCommand(position_sfen().c_str());
-  master.SendCommand("go infinite ignoremoves%s", ignoremoves.c_str());
-  master.ExecuteTask();
+  // 6. 各リーフノードについて、それぞれ１台のワーカを割り当てる
+  for (size_t worker_id = 0; worker_id < leaf_nodes_.size(); ++worker_id) {
+    std::unique_ptr<ClusterWorker>& worker = workers_.at(worker_id);
+    const MinimaxNode& leaf_node = *leaf_nodes_.at(worker_id);
+    worker->SendCommand("%s", leaf_node.GetPositionCommand().c_str());
+    worker->SendCommand("%s", leaf_node.GetGoCommand().c_str());
+    worker->ExecuteTask();
+  }
 
 #define USE_SIMPLE_TIMER
 #ifdef USE_SIMPLE_TIMER
@@ -275,22 +409,20 @@ void Cluster::OnStopCommandEntered() {
   }
 
   // 最善手を送信する
-  const std::vector<std::string>& pv = best_move_info_.pv;
+  const std::vector<std::string>& pv = root_of_minimax_tree_.usi_info().pv;
   if (pv.empty()) {
     SYNCED_PRINTF("bestmove resign\n");
-  } else if (pv.size() == 1) {
-    SYNCED_PRINTF("bestmove %s\n", pv.at(0).c_str());
   } else {
-    SYNCED_PRINTF("bestmove %s ponder %s\n", pv.at(0).c_str(), pv.at(1).c_str());
-  }
+    // bestmoveコマンドを返す前に、ここで１度は必ずinfoコマンドを送る
+    SYNCED_PRINTF("%s\n", root_of_minimax_tree_.usi_info().ToString().c_str());
 
-  // 次回探索時の探索割当の参考とするため、予想局面及び予想局面における最善手を保存しておく
-  if (pv.size() >= 3) {
-    predicted_position_ = position_sfen() + " " + pv.at(0) + " " + pv.at(1);
-    predicted_move_ = pv.at(2);
-  } else {
-    predicted_position_.clear();
-    predicted_move_.clear();
+    if (pv.size() == 1) {
+      // PVの長さが１手分しかなければ、bestmoveのみを返す
+      SYNCED_PRINTF("bestmove %s\n", pv.at(0).c_str());
+    } else {
+      // PVの長さが２手分以上あれば、先読み（ponder）の指示をだす
+      SYNCED_PRINTF("bestmove %s ponder %s\n", pv.at(0).c_str(), pv.at(1).c_str());
+    }
   }
 }
 
@@ -311,61 +443,27 @@ void Cluster::UpdateInfo(int worker_id, const UsiInfo& usi_info) {
   // 最善手を特定する際にデータが更新されないように、排他制御を行う
   std::unique_lock<std::mutex> lock(mutex_);
 
-  // 現在の最善手を求める
-  int best_worker_id = 0, second_worker_id = 1;
-  Score best_score = -kScoreInfinite - 1, second_score = -kScoreInfinite - 2;
-  int64_t total_nps = 0, total_nodes = 0;
-  for (size_t i = 0; i < workers_.size(); ++i) {
-    const UsiInfo info = worker_infos_.at(i);
-    Score score = info.score;
-    if (score > best_score) {
-      second_score = best_score;
-      second_worker_id = best_worker_id;
-      best_score = score;
-      best_worker_id = i;
-    } else if (score > second_score) {
-      second_score = score;
-      second_worker_id = i;
-    }
-    total_nps += info.nps;
-    total_nodes += info.nodes;
-  }
+  // 前回の最善手情報を保存しておく
+  const UsiInfo previous_info = root_of_minimax_tree_.usi_info();
 
-  // 最善手を更新するかどうかを調べる
-  const UsiInfo* best_info = nullptr;
-  if (worker_id == best_worker_id) {
-    // 1. もともと最善手の場合: 次善手の評価値と比較する
-    if (   usi_info.score > second_score
-        || (usi_info.score == second_score && worker_id < best_worker_id)) {
-      // 最善手は変わらないが、最善手の評価値が更新された
-      best_info = &usi_info;
-      previous_best_worker_ = worker_id;
-    } else {
-      // 最善手が入れ替わった
-      best_info = &worker_infos_.at(second_worker_id);
-      previous_best_worker_ = second_worker_id;
-    }
-  } else {
-    // 2. もともと最善手以外の場合: 最善手の評価値と比較する
-    if (   usi_info.score > best_score
-        || (usi_info.score == best_score && worker_id < best_worker_id)) {
-      // 最善手が入れ替わった
-      best_info = &usi_info;
-      previous_best_worker_ = worker_id;
+  // たったいま受信したUSIのinfoコマンドの内容を保存する
+  leaf_nodes_.at(worker_id)->set_usi_info(usi_info);
+
+  // ミニマックス木を更新する
+  leaf_nodes_.at(worker_id)->UpdateMinimaxTree();
+
+  // ミニマックス木更新後の最善手情報を取得する
+  const UsiInfo& current_info = root_of_minimax_tree_.usi_info();
+
+  // 最善手の情報が更新されていたら、上流にinfoコマンドを送信する
+  if (!current_info.pv.empty()) {
+    if (   previous_info.pv.empty()                            // 初回の更新
+        || current_info.depth > previous_info.depth            // 読みが深くなった
+        || current_info.pv.front() != previous_info.pv.front() // 最善手が変わった
+        || current_info.score != previous_info.score) {        // 評価値が変わった
+      SYNCED_PRINTF("%s\n", current_info.ToString().c_str());
     }
   }
-
-  // 最善手を出力する
-  if (best_info != nullptr) {
-    UsiInfo temp = *best_info;
-    temp.nps = total_nps;
-    temp.nodes = total_nodes;
-    std::printf("%s\n", temp.ToString().c_str());
-    best_move_info_ = temp;
-  }
-
-  // ワーカのinfoコマンドを保存する
-  worker_infos_.at(worker_id) = usi_info;
 }
 
 #endif /* !defined(MINIMUM) */

@@ -1,12 +1,12 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * The MovePicker class below is derived from Stockfish 6.
  * Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
  * Copyright (C) 2008-2015 Marco Costalba, Joona Kiiski, Tord Romstad (Stockfish author)
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -57,7 +57,7 @@ class MovePicker {
    * ProbCut用のコンストラクタです.
    */
   MovePicker(const Position& pos, const HistoryStats& history,
-             const GainsStats& gains, Move hash_move);
+             const GainsStats& gains, Move hash_move, Score capture_threshold);
 
   /**
    * 次の手（残りの手の中で、最もβカットの可能性が高い手）を返します.

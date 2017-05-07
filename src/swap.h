@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -42,6 +42,11 @@ class Swap {
    * 駒交換が損になる場合（SEE値 < 0 の場合）に、trueを返します.
    */
   static bool IsLosing(Move move, const Position& pos);
+
+  /**
+   * 盤全体での駒交換の損得を計算します.
+   */
+  static Score EvaluateGlobalSwap(Move move, const Position& pos, int depth_limit);
 };
 
 #endif /* SWAP_H_ */

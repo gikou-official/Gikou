@@ -1,13 +1,14 @@
+BookFile             定跡ファイル(戦型選択用)
 BookMaxPly           定跡を何手目まで使うか
 ByoyomiMargin        秒読み時の余裕(ミリ秒)
 DrawScore            千日手の評価値
+DepthLimit           読みの深さ(強さのレベル調節用)
 FischerMargin        フィッシャールール時の余裕(ミリ秒)
-MinBookScoreForBlack この評価値未満の先手定跡を回避
-MinBookScoreForWhite この評価値未満の後手定跡を回避
 MinThinkingTime      最小思考時間(ミリ秒)
 MultiPV              候補手の数
 NarrowBook           勝率が相対的に低い定跡手を選ばない
 OwnBook              定跡を使う
+ResignScore          技巧が投了する評価値
 SuddenDeathMargin    切れ負けルール時の余裕(秒)
 Threads              スレッド数
 TinyBook             出現頻度の低い定跡手を選ばない

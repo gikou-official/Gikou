@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -37,6 +37,7 @@
 #include "position.h"
 #include "progress.h"
 #include "search.h"
+#include "teacher_data.h"
 #include "thinking.h"
 #include "usi.h"
 #include "usi_protocol.h"
@@ -48,7 +49,7 @@ namespace {
 void BenchmarkSearch();
 void BenchmarkMoveGeneration(int num_calls);
 void BenchmarkMateSearch(int num_calls, int ply);
-void CreateBook(const char* output_file_name);
+void CreateBook(const std::string& output_dir_name);
 void ComputeStatsOfGameDatabase(const char* event_name);
 void ComputeAllPossibleQuietMoves();
 void ComputePlayerRatings();
@@ -86,13 +87,29 @@ void Cli::ExecuteCommand(int argc, char* argv[]) {
     Consultation consultation;
     consultation.Start();
   } else if (command == "--create-book") {
-    const char* output_file_name = argc >= 3 ? argv[2] : "book.bin";
-    CreateBook(output_file_name);
+    std::string output_dir_name = argc >= 3 ? argv[2] : "books";
+    CreateBook(output_dir_name);
   } else if (command == "--db-stats") {
     const char* event_name = argc >= 3 ? argv[2] : nullptr;
     ComputeStatsOfGameDatabase(event_name);
+  } else if (command == "--generate-games") {
+    TeacherData::GenerateTeacherGames();
+  } else if (command == "--generate-positions") {
+    TeacherData::GenerateTeacherPositions();
+  } else if (command == "--generate-pvs") {
+    TeacherData::GenerateTeacherPvs();
   } else if (command == "--learn") {
-    Learning::LearnEvaluationParameters();
+    bool use_rootstrap = false;
+    bool use_logistic_regression = false;
+    Learning::LearnEvaluationParameters(use_rootstrap, use_logistic_regression);
+  } else if (command == "--learn-with-rootstrap") {
+    bool use_rootstrap = true;
+    bool use_logistic_regression = false;
+    Learning::LearnEvaluationParameters(use_rootstrap, use_logistic_regression);
+  } else if (command == "--learn-with-regression") {
+    bool use_rootstrap = true;
+    bool use_logistic_regression = true;
+    Learning::LearnEvaluationParameters(use_rootstrap, use_logistic_regression);
   } else if (command == "--learn-progress") {
     Progress::LearnParameters();
   } else if (command == "--learn-probability") {
@@ -229,17 +246,32 @@ void BenchmarkMateSearch(const int num_calls, const int ply) {
 
 /**
  * 定跡DBファイルを作成します.
- * @param output_file_name 定跡データの出力先のファイル名
+ * @param output_dir_name 定跡データの出力先のディレクトリ名
  */
-void CreateBook(const char* output_file_name) {
-  // 棋譜DBから定跡データを作る
-  Book book = Book::CreateBook();
+void CreateBook(const std::string& output_dir_name) {
+  //
+  // Step 1. 全戦型対応の定跡DBファイルを用意する
+  //
+  Book default_book = Book::CreateBook(OpeningStrategy::all_strategies());
+  default_book.WriteToFile((output_dir_name + "/00_全戦型.bin").c_str());
+  std::printf("00_全戦型.bin is created!\n");
 
-  // 定跡手について探索を行って、評価値を付ける
-  book.SearchAllBookMoves();
+  //
+  // Step 2. 各戦型ごとに、定跡DBファイルを用意する
+  //
+  for (OpeningStrategy opening_strategy : OpeningStrategy::all_strategies()) {
+    // 棋譜DBから定跡データを作る
+    Book book = Book::CreateBook(OpeningStrategySet(opening_strategy));
 
-  // ファイルに書き出す
-  book.WriteToFile(output_file_name);
+    // ファイルに書き出す
+    int book_id = opening_strategy.id() + 1; // 1から32まで
+    std::string id_str = (book_id < 10 ? "0" : "") + std::to_string(book_id);
+    std::string strategy_name = opening_strategy.japanese_name();
+    std::string file_name = id_str + "_" + strategy_name + ".bin";
+    book.WriteToFile((output_dir_name + "/" + file_name).c_str());
+
+    std::printf("%s is created!\n", file_name.c_str());
+  }
 }
 
 /**

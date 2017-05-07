@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -62,7 +62,7 @@ void ConsultationWorker::Initialize() {
     // b. ワーカーの起動
     std::string worker_name = "cluster-" + std::to_string(worker_id());
     char* const args[] = {
-#if 0
+#if 1
         // リモートマシンをワーカーとして使用する場合: SSHで通信する
         const_cast<char*>("ssh"),
         const_cast<char*>(worker_name.c_str()), // ~/.ssh/configでワーカーのホスト名を設定しておく
@@ -83,7 +83,7 @@ void ConsultationWorker::Initialize() {
   SendCommand("usi");
   const UsiOptions& options = consultation_.usi_options();
   if (worker_id() == consultation_.master_worker_id()) {
-    // ワーカーのメモリ容量とスレッド数については、マシン固定なのでひとまずベタ打ちしておく
+    // マスターワーカーのメモリ容量とスレッド数については、特定のマシンを使うことにして、ひとまずベタ打ちしておく
     SendCommand("setoption name USI_Hash value %d", 8192);
     SendCommand("setoption name Threads value %d", 5);
     SendCommand("setoption name DrawScore value %d", (int)options["DrawScore"]);
@@ -134,7 +134,7 @@ Consultation::Consultation()
 
 void Consultation::OnIsreadyCommandEntered() {
   // 定跡ファイルを読み込む
-  g_book.ReadFromFile("book.bin");
+  g_book.ReadFromFile(usi_options()["BookFile"].string().c_str());
 
   if (workers_.empty()) {
     // 1. 初回は、ワーカーを必要なだけ起動する

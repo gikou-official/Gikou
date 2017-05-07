@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -48,7 +48,7 @@ class UsiOption {
  public:
 
   enum Type {
-    kNoType, kCheck, kSpin,
+    kNoType, kCheck, kSpin, kFileName,
   };
 
   /**
@@ -95,6 +95,20 @@ class UsiOption {
   }
 
   /**
+   * USIオプション（filename）のコンストラクタです.
+   * @param default_string USIオプションの初期値
+   */
+  UsiOption(const char* default_filename)
+      : value_(0),
+        string_(default_filename),
+        default_string_(default_filename),
+        default_value_(0),
+        min_(0),
+        max_(0),
+        type_(kFileName) {
+  }
+
+  /**
    * USIオプションの値を設定します.
    */
   UsiOption& operator=(const std::string& value) {
@@ -102,6 +116,8 @@ class UsiOption {
       value_ = static_cast<int>(value == "true");
     } else if (type_ == kSpin) {
       value_ = std::min(std::max(std::stoi(value), min_), max_);
+    } else if (type_ == kFileName) {
+      string_ = value;
     }
     return *this;
   }
@@ -112,6 +128,14 @@ class UsiOption {
 
   int default_value() const {
     return default_value_;
+  }
+
+  const std::string& string() const {
+    return string_;
+  }
+
+  const std::string& default_string() const {
+    return default_string_;
   }
 
   int min() const {
@@ -128,6 +152,7 @@ class UsiOption {
 
  private:
   int value_;
+  std::string string_, default_string_;
   const int default_value_, min_, max_;
   const Type type_;
 };

@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -262,7 +262,7 @@ PackedScore EvaluateDifferenceOfControls(const Position& pos,
  * （参考文献）
  *   - 山下宏: YSS--そのデータ構造、およびアルゴリズムについて, 『コンピュータ将棋の進歩２』,
  *     p.127, 共立出版, 1998.
- *   - 鶴岡慶雅: 将棋プログラム「激指」, 『コンピュータ将棋の進歩３』, pp.10-11, 共立出版,
+ *   - 鶴岡慶雅: 将棋プログラム「激指」, 『コンピュータ将棋の進歩４』, pp.10-11, 共立出版,
  *     2003.
  *   - 橋本剛: 将棋プログラムTACOSのアルゴリズム, 『コンピュータ将棋の進歩５』, pp.53-55,
  *     共立出版, 2005.

@@ -1,13 +1,13 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * The Search class below is derived from Stockfish 7.
  * Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
  * Copyright (C) 2008-2015 Marco Costalba, Joona Kiiski, Tord Romstad (Stockfish author)
  * Copyright (C) 2015-2016 Marco Costalba, Joona Kiiski, Gary Linscott, Tord Romstad (Stockfish author)
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -84,8 +84,10 @@ inline int futility_move_count(bool is_pv_node, Depth depth) {
   return (is_pv_node ? 8 : 6) * depth / kOnePly;
 }
 
-inline Score futility_margin(Depth depth) {
-  return static_cast<Score>(200 * (depth / kOnePly));
+inline Score futility_margin(Depth depth, double progress) {
+  // 終盤になるほど、マージンを大きくする
+  int c = static_cast<int>(120.0 + 80.0 * progress);
+  return static_cast<Score>(c * (depth / kOnePly));
 }
 
 template<bool kIsPv>
@@ -169,9 +171,10 @@ void Search::PrepareForNextSearch() {
   followupmoves_.Clear();
   gains_.Clear();
 
-  // マスタースレッドの場合は、スレッド間で共有する置換表の世代を更新する
+  // マスタースレッドの場合は、スレッド間で共有する置換表と実現確率キャッシュの世代を更新する
   if (is_master_thread()) {
     shared_.hash_table.NextAge();
+    MoveProbability::SetCacheTableToNextAge();
   }
 }
 
@@ -208,6 +211,88 @@ Score Search::NullWindowSearch(Node& node, Score alpha, Score beta, Depth depth)
   } else {
     return QuiecenceSearch<kNonPvNode>(node, alpha, beta, depth, 0);
   }
+}
+
+std::pair<Move, Score> Search::SimpleIterativeDeepening(const Position& pos) {
+  // 統計データをリセットする
+  max_reach_ply_ = 0;
+  num_nodes_searched_ = 0;
+
+  // 探索に使うスタックを初期化する
+  ResetSearchStack();
+
+  // root_moves_を初期化する
+  root_moves_.clear();
+  for (ExtMove ext_move : SimpleMoveList<kAllMoves, true>(pos)) {
+    root_moves_.emplace_back(ext_move.move);
+  }
+  assert(!root_moves_.empty());
+
+  // 反復深化を行う
+  Node node(pos);
+  for (int iteration = 1; iteration < kMaxPly; ++iteration) {
+    // 前回探索時の評価値を保存する
+    for (RootMove& rm : root_moves_) {
+      rm.previous_score = rm.score;
+    }
+
+    // αβウィンドウをセットする
+    Score alpha = -kScoreInfinite, beta = kScoreInfinite;
+    Score half_window = Score(64);
+    if (iteration >= 5) {
+      Score previous_score = root_moves_.front().previous_score;
+      alpha = std::max(previous_score - half_window, -kScoreInfinite);
+      beta = std::min(previous_score + half_window, kScoreInfinite);
+    }
+
+    while (true) {
+      // 探索を行う
+      Depth depth = iteration * kOnePly;
+      Score score = MainSearch<kRootNode>(node, alpha, beta, depth, 0, false);
+
+      // 最善手を先頭に持ってくる
+      std::stable_sort(root_moves_.begin(), root_moves_.end(),
+                       std::greater<RootMove>());
+
+      // 置換表からPVが消える場合があるので、置換表にPVを保存しておく
+      for (int i = 0; i <= pv_index_; ++i) {
+        shared_.hash_table.InsertMoves(node, root_moves_.at(i).pv);
+      }
+
+      // 終了指示が来ていたら終了する
+      if (shared_.signals.stop) {
+        break;
+      }
+
+      // αβウィンドウを再設定する
+      if (score <= alpha) {
+        // fail-low
+        alpha = std::max(alpha - half_window, -kScoreInfinite);
+        beta = (alpha + beta) / 2;
+      } else if (score >= beta) {
+        // fail-high
+        alpha = (alpha + beta) / 2;
+        beta = std::min(beta + half_window, kScoreInfinite);
+      } else {
+        break;
+      }
+
+      // ウィンドウを指数関数的に増加させる
+      half_window += half_window / 2;
+    }
+
+    // 終了指示が来ていたら終了する & 詰みが見つかったら終了する
+    if (   shared_.signals.stop
+        || std::abs(root_moves_.front().score) >= kScoreKnownWin) {
+      break;
+    }
+  }
+
+  // 最善手と評価値を取得する
+  Move best_move = root_moves_.front().move;
+  Score score = root_moves_.front().score;
+
+  return std::make_pair(best_move, score);
 }
 
 void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
@@ -341,6 +426,12 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
       last_info_time = elapsed_time;
     }
 
+    // 深さの上限 or ノード数の上限に達したら、そこで終了する
+    if (iteration >= depth_limit_ || nodes >= nodes_limit_) {
+      shared_.signals.stop = true; // ワーカースレッドを停止する
+      break;
+    }
+
     // 思考時間管理のための統計情報をタイムマネージャーに送る
     if (is_master_thread()) {
       // 時間管理に用いる統計データの保存
@@ -419,6 +510,7 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
 
   best_score = -kScoreInfinite;
   ss->current_move = ss->hash_move = (ss+1)->excluded_move = best_move = kMoveNone;
+  ss->countermoves_history = nullptr;
   (ss+1)->skip_null_move = false;
   (ss+1)->reduction = kDepthZero;
   (ss+2)->killers[0] = (ss+2)->killers[1] = kMoveNone;
@@ -480,7 +572,8 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
   }
 
   // 評価関数を呼ぶ
-  eval = node.Evaluate(); // 差分計算を行うため、常に評価関数を呼ぶ
+  double progress;
+  eval = node.Evaluate(&progress); // 評価値の差分計算を行う（進行度も同時に計算する）
   if (in_check) {
     ss->static_score = kScoreNone;
     goto moves_loop;
@@ -530,9 +623,9 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
   if (   !kIsPv
       && !ss->skip_null_move
       &&  depth < 7 * kOnePly
-      &&  eval - futility_margin(depth) >= beta
+      &&  eval - futility_margin(depth, progress) >= beta
       &&  abs(beta) < kScoreMateInMaxPly) {
-    return eval - futility_margin(depth);
+    return eval - futility_margin(depth, progress);
   }
 
   // ３手以内の詰みを調べる
@@ -563,6 +656,7 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
     shared_.hash_table.Prefetch(node.key_after_null_move());
 
     ss->current_move = kMoveNull;
+    ss->countermoves_history = nullptr;
     assert(eval - beta >= 0);
 
     // 削減する深さの決定
@@ -596,7 +690,7 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
     assert(rdepth >= kOnePly);
     assert((ss-1)->current_move.is_real_move());
 
-    MovePicker mp(node, history_, gains_, hash_move);
+    MovePicker mp(node, history_, gains_, hash_move, rbeta - ss->static_score);
 
     double dummy;
     for (Move move; (move = mp.NextMove(&dummy)) != kMoveNone;)
@@ -606,6 +700,7 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
         shared_.hash_table.Prefetch(key_after_move);
 
         ss->current_move = move;
+        ss->countermoves_history = shared_.countermoves_history[move];
 
         node.MakeMove(move, node.MoveGivesCheck(move), key_after_move);
         Score score = -MainSearch<kNonPvNode>(node, -rbeta, -rbeta + 1, rdepth,
@@ -619,10 +714,10 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
   }
 
   // 内部反復深化（王手がかかっている場合は、スキップされる）
-  if (   depth >= (kIsPv ? 5 * kOnePly : 8 * kOnePly)
+  if (   depth >= 6 * kOnePly
       && hash_move == kMoveNone
       && (kIsPv || ss->static_score + 256 >= beta)) {
-    Depth d = depth - 2 * kOnePly - (kIsPv ? kDepthZero : depth / 4);
+    Depth d = (depth * 3 / 4) - (2 * kOnePly);
 
     ss->skip_null_move = true;
     MainSearch<kIsPv ? kPvNode : kNonPvNode>(node, alpha, beta, d, ply, true);
@@ -686,9 +781,12 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
     Depth ext = kDepthZero;
     const bool move_is_quiet = move.is_quiet();
     const bool move_gives_check = node.MoveGivesCheck(move);
+    const bool move_count_pruning =    depth < 16 * kOnePly
+                                    && move_count >= futility_move_count(kIsPv, depth);
 
     // 王手延長
-    if (move_gives_check) {
+    if (   move_gives_check
+        && !move_count_pruning) {
       ext = !Swap::IsLosing(move, node) ? kOnePly : (kOnePly / 2);
     }
 
@@ -700,16 +798,16 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
         && abs(hash_score) < kScoreKnownWin) {
       assert(hash_score != kScoreNone);
 
-      Score rbeta = hash_score - 50;
+      Score rbeta = hash_score - int(3 * depth / kOnePly);
       ss->excluded_move = move;
       ss->skip_null_move = true;
-      Score score = MainSearch<kNonPvNode>(node, rbeta-1, rbeta, depth / 2, ply,
+      Score score = MainSearch<kNonPvNode>(node, rbeta-1, rbeta, depth / 3, ply,
                                            cut_node);
       ss->skip_null_move = false;
       ss->excluded_move = kMoveNone;
 
       if (score < rbeta) {
-        ext = kOnePly / 2;
+        ext = kOnePly;
       }
     }
 
@@ -725,8 +823,7 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
         && best_score > kScoreMatedInMaxPly) {
 
       // Move count based pruning
-      if (   depth < 16 * kOnePly
-          && move_count >= futility_move_count(kIsPv, depth)
+      if (   move_count_pruning
           && gains_[move] < kScoreZero
           && history_.HasNegativeScore(move)) {
         continue;
@@ -737,7 +834,7 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
 
       // futility pruning
       if (predicted_depth < 7 * kOnePly) {
-        Score futility_score = ss->static_score + futility_margin(predicted_depth)
+        Score futility_score = ss->static_score + futility_margin(predicted_depth, progress)
                                + 128 + gains_[move];
         if (futility_score <= alpha) {
           best_score = std::max(best_score, futility_score);
@@ -764,6 +861,7 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
 
     const bool is_pv_move = kIsPv && move_count == 1;
     ss->current_move = move;
+    ss->countermoves_history = shared_.countermoves_history[move];
     if (move_is_quiet && quiet_count < 64) {
       quiets_searched[quiet_count++] = move;
     }
@@ -781,17 +879,17 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
     }
 
     // 実現確率 及び LMR（Late Move Reduction）
-    // 深さ >= 8手 では実現確率を、深さ < 8手 ではLMRを用いる。
+    // 一定以上の残り深さがあれば実現確率を、そうでなければLMRを用いる。
     // 本当はすべて実現確率にしたいところだが、実現確率の計算コストが高いため、残り深さが大きい
     // ところに限って実現確率を用いている
     if (   depth >= 3 * kOnePly
-        && (move_is_quiet || depth >= 8 * kOnePly)
+        && (move_is_quiet || depth >= MoveProbability::kAppliedDepth)
         && move_count >= 2
         && move != ss->killers[0]
         && move != ss->killers[1]) {
 
       // 実現確率
-      if (depth >= 8 * kOnePly) {
+      if (depth >= MoveProbability::kAppliedDepth) {
         // 指し手の確率に基づいて、何手減らすかを決定する
         const double kPvFactor = kIsPv ? 0.75 : 1.0;
         double consumption = kPvFactor * -std::log(probability) / std::log(2.0);
@@ -1105,6 +1203,10 @@ Score Search::QuiecenceSearch(Node& node, Score alpha, Score beta,
     if (score > best_score) {
       best_score = score;
       if (score > alpha) {
+        if (kIsPv) {
+          pv_table_.CopyPv(move, ply);
+        }
+
         if (kIsPv && score < beta) {
           alpha = score;
           best_move = move;
@@ -1151,13 +1253,6 @@ Score Search::QuiecenceSearch(Node& node, Score alpha, Score beta,
                           kIsPv && best_score > old_alpha ? kBoundExact : kBoundUpper,
                           ss->static_score, true);
 
-  // PVを保存する
-  if (   kIsPv
-      && best_move != kMoveNone
-      && best_score > old_alpha) { // stand patよりも、1手指したほうがよい場合
-    pv_table_.CopyPv(best_move, ply);
-  }
-
   assert(-kScoreInfinite < best_score && best_score < kScoreInfinite);
   return best_score;
 }
@@ -1167,20 +1262,37 @@ void Search::UpdateStats(Stack* const ss, Move move, Depth depth,
   assert(ss != nullptr);
   assert(quiets != nullptr || quiets_count == 0);
 
+  HistoryStats* countermoves_history = (ss-1)->countermoves_history;
+  HistoryStats* followupmoves_history = (ss-2)->countermoves_history;
+
   // 1. キラー手を更新する
   if (ss->killers[0] != move) {
     ss->killers[1] = ss->killers[0];
     ss->killers[0] = move;
   }
 
-  // 2. ヒストリー値を更新する
+  // 2. βカットした手のヒストリー値を加点する
   history_.UpdateSuccess(move, depth);
+  if (countermoves_history != nullptr) {
+    countermoves_history->UpdateSuccess(move, depth);
+  }
+  if (followupmoves_history != nullptr) {
+    followupmoves_history->UpdateSuccess(move, depth);
+  }
+
+  // 3. βカットしなかった手のヒストリー値を減点する
   for (int i = 0; i < quiets_count; ++i) {
     assert(quiets[i] != move);
     history_.UpdateFail(quiets[i], depth);
+    if (countermoves_history != nullptr) {
+      countermoves_history->UpdateFail(quiets[i], depth);
+    }
+    if (followupmoves_history != nullptr) {
+      followupmoves_history->UpdateFail(quiets[i], depth);
+    }
   }
 
-  // 3. カウンター手とフォローアップ手を更新する
+  // 4. カウンター手とフォローアップ手を更新する
   if ((ss-1)->current_move.is_real_move()) {
     countermoves_.Update((ss-1)->current_move, move);
   }

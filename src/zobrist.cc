@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -26,6 +26,7 @@ ArrayMap<Key64, Color> Zobrist::null_move_;
 ArrayMap<Key64, Square, Piece> Zobrist::psq_;
 ArrayMap<Key64, Piece> Zobrist::hand_;
 Array<ArrayMap<Key64, Square, Piece>, Zobrist::kPathTableSize> Zobrist::path_;
+Array<Key64, Zobrist::kPathTableSize> Zobrist::null_move_on_path_;
 
 void Zobrist::Init() {
   std::random_device rd;
@@ -49,9 +50,12 @@ void Zobrist::Init() {
     hand_[p] = Key64(dis(gen));
   }
 
-  for (int i = 0; i < kPathTableSize; ++i)
+  for (int i = 0; i < kPathTableSize; ++i) {
     for (Square s : Square::all_squares())
       for (Piece p : Piece::all_pieces()) {
         path_[i][s][p] = Key64(dis(gen));
       }
+
+    null_move_on_path_[i] = Key64(dis(gen));
+  }
 }

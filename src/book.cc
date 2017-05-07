@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -40,54 +40,96 @@
 
 namespace {
 
+// 初手から何手目までを定跡として登録するか
+const int kMaxBookPly = 50; // 初手から最大50手まで定跡として登録する
+
+// 急戦定跡を除外するか
+const int kRemoveQuickAttackOpening = false;
+
 // 定跡手を探索する最大深さ
-const Depth kBookSearchDepth = 28 * kOnePly;
+const Depth kBookSearchDepth = 32 * kOnePly;
+
+// 戦型の別名（表記ゆれ等に対応するため）
+const std::unordered_map<std::string, std::string> g_opening_strategy_aliases{
+  // 矢倉
+  {"相矢倉", "矢倉"},
+  {"矢倉33角", "矢倉"},
+  {"矢倉37銀64角53銀", "矢倉"},
+
+  // 相掛かり
+  {"ひねり飛車", "相掛かり"},
+  {"タテ歩取り", "相掛かり"},
+
+  // 横歩取り
+  {"横歩取り３三角", "横歩取り"},
+  {"後手横歩取り", "横歩取り"},
+  {"横歩取り８五飛", "横歩取り"},
+  {"△５四歩型横歩取り", "横歩取り"},
+
+  // 角換わり
+  {"角交換腰掛銀", "角換わり"},
+  {"角換わり棒銀", "角換わり"},
+  {"筋違角", "角換わり"},
+  {"△３三桂型角換わり", "角換わり"},
+  {"角換棒銀", "角換わり"},
+  {"一手損角換わり", "角換わり"},
+  {"△５四歩型角換わり", "角換わり"},
+  {"角換早繰銀", "角換わり"},
+  {"角換腰掛銀", "角換わり"},
+  {"角換わり腰掛け銀", "角換わり"},
+
+  // 四間飛車
+  {"先手四間飛車", "四間飛車"},
+
+  // 中飛車
+  {"先手中飛車", "中飛車"},
+  {"ゴキゲン中飛車", "中飛車"},
+
+  // 三間飛車
+  {"先手三間飛車", "三間飛車"},
+  {"三間飛車石田流", "三間飛車"},
+
+  // 向飛車
+  {"先手向飛車", "向飛車"},
+  {"角換向飛車", "向飛車"},
+  {"向かい飛車", "向飛車"},
+  {"ダイレクト向かい飛車", "向飛車"},
+};
 
 } // namespace
 
-// 戦型の日本語名（タイトル戦や順位戦での出現数が多い順に並んでいます）
-Array<std::string, 32> OpeningStrategy::japanese_names_ = {
-    /* id_ =  0 */ "矢倉",
-    /* id_ =  1 */ "四間飛車",
-    /* id_ =  2 */ "中飛車",
-    /* id_ =  3 */ "三間飛車",
-    /* id_ =  4 */ "相掛かり",
-    /* id_ =  5 */ "横歩取り",
-    /* id_ =  6 */ "角換わり",
-    /* id_ =  7 */ "向飛車",
-    /* id_ =  8 */ "ひねり飛車",
-    /* id_ =  9 */ "相振飛車",
-    /* id_ = 10 */ "角交換腰掛銀",
-    /* id_ = 11 */ "陽動振飛車",
-    /* id_ = 12 */ "先手三間飛車",
-    /* id_ = 13 */ "先手中飛車",
-    /* id_ = 14 */ "角交換その他",
-    /* id_ = 15 */ "右四間飛車",
-    /* id_ = 16 */ "先手四間飛車",
-    /* id_ = 17 */ "右玉",
-    /* id_ = 18 */ "雁木",
-    /* id_ = 19 */ "角換わり棒銀",
-    /* id_ = 20 */ "筋違角",
-    /* id_ = 21 */ "５筋位取り",
-    /* id_ = 22 */ "先手向飛車",
-    /* id_ = 23 */ "角換わり拒否",
-    /* id_ = 24 */ "タテ歩取り",
-    /* id_ = 25 */ "袖飛車",
-    /* id_ = 26 */ "棒銀",
-    /* id_ = 27 */ "三間飛車石田流",
-    /* id_ = 28 */ "角換向飛車",
-    /* id_ = 29 */ "ゴキゲン中飛車",
-    /* id_ = 30 */ "風車",
-    /* id_ = 31 */ "その他の戦型",
+// 戦型の日本語名
+Array<std::string, OpeningStrategy::kNumStrategies> OpeningStrategy::japanese_names_ = {
+    /* id_ = 0 */ "矢倉",
+    /* id_ = 1 */ "相掛かり",
+    /* id_ = 2 */ "横歩取り",
+    /* id_ = 3 */ "角換わり",
+    /* id_ = 4 */ "四間飛車",
+    /* id_ = 5 */ "中飛車",
+    /* id_ = 6 */ "三間飛車",
+    /* id_ = 7 */ "向飛車",
+    /* id_ = 8 */ "その他の戦型",
 };
 
 OpeningStrategy OpeningStrategy::of(const std::string& japanese_name) {
+
+  std::string name = japanese_name;
+
+  // 別名 or 表記ゆれがある場合は、標準的な名前に補正する
+  auto it = g_opening_strategy_aliases.find(japanese_name);
+  if (it != g_opening_strategy_aliases.end()) {
+    name = it->second;
+  }
+
+  // 一致する戦型があれば、それを返す
   for (size_t i = 0; i < japanese_names_.size(); ++i) {
-    if (japanese_names_[i] == japanese_name) {
+    if (japanese_names_[i] == name) {
       return OpeningStrategy(i);
     }
   }
-  return OpeningStrategy(31); // 一致する戦型がなければ、「その他の戦型」を返す
+
+  // 一致する戦型がなければ、「その他の戦型」を返す
+  return OpeningStrategy(OpeningStrategy::max());
 }
 
 Move BookMoves::PickBest() const {
@@ -246,10 +288,14 @@ BookMoves Book::GetBookMoves(const Position& pos, const UsiOptions& usi_options)
     sum_frequency += double(bm.frequency);
   }
 
+#if 0
   // a. 定跡手の評価値のしきい値（手番側から見た評価値がこの値未満の定跡手は選択しない）
   int min_book_score = pos.side_to_move() == kBlack
                      ? usi_options["MinBookScoreForBlack"]
                      : usi_options["MinBookScoreForWhite"];
+#else
+  int min_book_score = -kScoreInfinite; // 無効化
+#endif
 
   // b. NarrowBook（出現頻度や勝率が低い定跡を除外する）
   bool narrow_book = usi_options["NarrowBook"];
@@ -403,8 +449,6 @@ void Book::WriteToFile(const char* file_name) const {
 }
 
 void Book::SearchAllBookMoves() {
-  const int kMaxBookPly = 50; // 初手から最大50手まで定跡として登録する
-
   // 棋譜DBを準備する
   std::ifstream game_db_file(GameDatabase::kDefaultDatabaseFile);
   GameDatabase game_db(game_db_file);
@@ -418,8 +462,8 @@ void Book::SearchAllBookMoves() {
 
   // USIオプションを使い、得点を付加する対象の手を特定する
   UsiOptions usi_options;
-  usi_options["NarrowBook"] = std::string("false");
-  usi_options["TinyBook"] = std::string("false");
+  usi_options["NarrowBook"] = std::string("true");
+  usi_options["TinyBook"] = std::string("true");
 
   // 進行状況を表示するためのタイマーを準備する
   ProgressTimer progress_timer(entries_.size());
@@ -504,7 +548,7 @@ void Book::SearchAllBookMoves() {
 
         // 定跡手以下の探索を行う
         search.PrepareForNextSearch();
-        shared_data.hash_table.Clear();
+        shared_data.Clear();
         node.MakeMove(book_move);
         Score inf = kScoreInfinite;
         Score score = -search.AlphaBetaSearch(node, -inf, inf, kBookSearchDepth);
@@ -551,7 +595,7 @@ void Book::SearchAllBookMoves() {
   }
 }
 
-Book Book::CreateBook() {
+Book Book::CreateBook(const OpeningStrategySet& opening_strategies) {
   Book book;
 
   // 1. 局面のハッシュ値のシードを乱数生成器を用いて生成する
@@ -571,7 +615,6 @@ Book Book::CreateBook() {
   }
 
   // 2. 対局データを読み込む準備をする
-  const int kMaxBookPly = 50; // 初手から最大50手まで定跡として登録する
   std::ifstream game_db_file(GameDatabase::kDefaultDatabaseFile);
   GameDatabase game_db(game_db_file);
   game_db.set_title_matches_only(true);
@@ -600,39 +643,47 @@ Book Book::CreateBook() {
       continue;
     }
 
+    // 作成対象とされていない戦型は除外する
+    const OpeningStrategy opening_strategy = OpeningStrategy::of(game.opening);
+    if (!opening_strategies.test(opening_strategy)) {
+      continue;
+    }
+
     // 現在の進捗状況をプリントする
     if (++game_count % 1000 == 0) {
       std::printf("%d games finished.\n", game_count);
     }
 
     // 急戦定跡を除外する
-    bool is_quick_attack_opening = false;
-    for (size_t i = 0; i < 20 && i < game.moves.size(); ++i) {
-      Move move = game.moves.at(i);
-      // 1. 20手以内に成駒ができる定跡は、急戦定跡とみなす（ただし、角換わりの角交換は対象外）
-      if (   move.is_promotion()
-          && !(   game.opening == "角換わり"
-               && move.piece_type() == kBishop
-               && move.captured_piece_type() == kBishop)) {
-        is_quick_attack_opening = true;
-        break;
+    if (kRemoveQuickAttackOpening) {
+      bool is_quick_attack_opening = false;
+      for (size_t i = 0; i < 20 && i < game.moves.size(); ++i) {
+        Move move = game.moves.at(i);
+        // 1. 20手以内に成駒ができる定跡は、急戦定跡とみなす（ただし、角換わりの角交換は対象外）
+        if (   move.is_promotion()
+            && !(   game.opening == "角換わり"
+                 && move.piece_type() == kBishop
+                 && move.captured_piece_type() == kBishop)) {
+          is_quick_attack_opening = true;
+          break;
+        }
+        // 2. 20手以内に飛車交換をする手は、急戦定跡とみなす
+        if (move.piece_type() == kRook && move.captured_piece_type() == kRook) {
+          is_quick_attack_opening = true;
+          break;
+        }
       }
-      // 2. 20手以内に飛車交換をする手は、急戦定跡とみなす
-      if (move.piece_type() == kRook && move.captured_piece_type() == kRook) {
-        is_quick_attack_opening = true;
-        break;
+      if (is_quick_attack_opening) {
+        continue;
       }
-    }
-    if (is_quick_attack_opening) {
-      continue;
     }
 
-    int ply = 0;
     Position pos = startpos;
     Color winner = game.result == Game::kBlackWin ? kBlack : kWhite;
-    OpeningStrategy opening_strategy = OpeningStrategy::of(game.opening);
 
-    for (Move move : game.moves) {
+    for (size_t ply = 0; ply < game.moves.size(); ++ply) {
+      Move move = game.moves.at(ply);
+
       if (ply >= kMaxBookPly || !pos.MoveIsLegal(move)) {
         break;
       }
@@ -664,9 +715,9 @@ Book Book::CreateBook() {
     temp.push_back(pair.second);
   }
   auto end = std::remove_if(temp.begin(), temp.end(), [](const Entry& e) {
-    // 登録する条件１：その手を指した側が、２回以上勝っている
-    // 登録する条件２：その手を指した側の勝率が、40%以上である
-    return (e.win_count < 2) || (5 * e.win_count < 2 * e.frequency);
+    // 登録する条件１：その手が２回以上出現している
+    // 登録する条件２：その手を指した側が１回以上勝っている
+    return e.frequency < 2 || e.win_count < 1;
   });
   for (auto it = temp.begin(); it != end; ++it) {
     book.entries_.push_back(*it);

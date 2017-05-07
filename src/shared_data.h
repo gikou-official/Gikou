@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,6 +22,7 @@
 
 #include "hash_table.h"
 #include "signals.h"
+#include "stats.h"
 
 /**
  * ルート局面における指し手の情報を保存するためのクラスです。
@@ -56,8 +57,17 @@ class RootMove {
  * 複数の探索スレッドで共有するデータをひとまとめにしたクラスです。
  */
 struct SharedData {
+  void Clear() {
+    hash_table.Clear();
+    countermoves_history.Clear();
+    signals.Reset();
+  }
+
   /** 置換表 */
   HashTable hash_table;
+
+  /** カウンター手ごとのヒストリー値の統計 */
+  CountermovesHistoryStats countermoves_history;
 
   /** 探索停止等の指示を出すシグナル */
   Signals signals;

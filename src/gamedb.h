@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -34,14 +34,14 @@ struct Game {
    * 対局結果を表す値です.
    */
   enum Result {
+    /** 引き分け */
+    kDraw     = 0,
+
     /** 先手勝ち */
     kBlackWin = 1,
 
     /** 後手勝ち */
     kWhiteWin = 2,
-
-    /** 引き分け */
-    kDraw     = 3,
   };
 
   /** 対局者 */
@@ -80,7 +80,7 @@ class GameDatabase {
   /**
    * デフォルトで読み込む棋譜DBファイルの場所.
    */
-  static constexpr const char* kDefaultDatabaseFile = "kifu.txt";
+  static constexpr const char* kDefaultDatabaseFile = "kifu_db.txt";
 
   /**
    * コンストラクタで、読み出しを行うDBファイルのストリームを指定してください.

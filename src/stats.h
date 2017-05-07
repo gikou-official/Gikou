@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -21,6 +21,7 @@
 #define STATS_H_
 
 #include <functional>
+#include <memory>
 #include "common/array.h"
 #include "common/arraymap.h"
 #include "move.h"
@@ -30,9 +31,7 @@
  */
 class HistoryStats {
  public:
-  enum {
-    kMax = 8192,
-  };
+  static constexpr int32_t kMax = 250;
 
   /**
    * ヒストリー値を取得します.
@@ -40,9 +39,7 @@ class HistoryStats {
    */
   int32_t operator[](Move move) const {
     assert(move.is_quiet());
-    const Entry& entry = table_[move.PerfectHash()];
-    // additive smoothing
-    return kMax * (entry.good + 1) / (entry.tried + 2);
+    return table_[move.to()][move.piece()];
   }
 
   /**
@@ -50,9 +47,7 @@ class HistoryStats {
    */
   bool HasNegativeScore(Move move) const {
     assert(move.is_quiet());
-    const Entry& entry = table_[move.PerfectHash()];
-    // (entry.good + 1) / (entry.tried + 2) < 0.5
-    return 2 * (entry.good + 1) < entry.tried + 2;
+    return table_[move.to()][move.piece()] < 0;
   }
 
   /**
@@ -61,17 +56,13 @@ class HistoryStats {
   void UpdateSuccess(Move move, Depth depth) {
     assert(move.is_quiet());
     assert(depth > kDepthZero);
-    uint32_t key = move.PerfectHash();
-    int32_t score = static_cast<int32_t>(depth / kOnePly);
-    // オーバーフローを回避する
-    if (table_[key].tried + score >= kMax) {
-      table_[key].good  /= 2;
-      table_[key].tried /= 2;
+    Square to = move.to();
+    Piece pc = move.piece();
+    int d = depth / kOnePly;
+    int score = d * d;
+    if (table_[to][pc] + score < kMax) {
+      table_[to][pc] += score;
     }
-    table_[key].good  += score;
-    table_[key].tried += score;
-    assert(table_[key].good < kMax);
-    assert(table_[key].tried < kMax);
   }
 
   /**
@@ -80,16 +71,13 @@ class HistoryStats {
   void UpdateFail(Move move, Depth depth) {
     assert(move.is_quiet());
     assert(depth > kDepthZero);
-    uint32_t key = move.PerfectHash();
-    int32_t score = static_cast<int32_t>(depth / kOnePly);
-    // オーバーフローを回避する
-    if (table_[key].tried + score >= kMax) {
-      table_[key].good  /= 2;
-      table_[key].tried /= 2;
+    Square to = move.to();
+    Piece pc = move.piece();
+    int d = depth / kOnePly;
+    int score = d * d;
+    if (table_[to][pc] - score > -kMax) {
+      table_[to][pc] -= score;
     }
-    table_[key].tried += score;
-    assert(table_[key].good < kMax);
-    assert(table_[key].tried < kMax);
   }
 
   void Clear() {
@@ -97,11 +85,39 @@ class HistoryStats {
   }
 
  private:
-  struct Entry {
-    int32_t good  = 0;
-    int32_t tried = 0;
-  };
-  Array<Entry, Move::kPerfectHashSize> table_;
+  ArrayMap<int16_t, Square, Piece> table_;
+};
+
+/**
+ * カウンター手のヒストリー値の統計を取るためのクラスです.
+ */
+class CountermovesHistoryStats {
+ public:
+  CountermovesHistoryStats()
+      : table_(new ArrayMap<HistoryStats, Square, Piece>()) {
+    Clear();
+  }
+
+  const HistoryStats* operator[](Move move) const {
+    assert(move.is_real_move());
+    return &(*table_)[move.to()][move.piece()];
+  }
+
+  HistoryStats* operator[](Move move) {
+    assert(move.is_real_move());
+    return &(*table_)[move.to()][move.piece()];
+  }
+
+  void Clear() {
+    for (Square s : Square::all_squares()) {
+      for (Piece p : Piece::all_pieces()) {
+        (*table_)[s][p].Clear();
+      }
+    }
+  }
+
+ private:
+  std::unique_ptr<ArrayMap<HistoryStats, Square, Piece>> table_;
 };
 
 /**
@@ -109,26 +125,39 @@ class HistoryStats {
  */
 class GainsStats {
  public:
+  struct Gain {
+    int32_t sum;
+    int32_t count;
+  };
+
   GainsStats() {
     Clear();
   }
 
   Score operator[](Move move) const {
     assert(move.is_quiet());
-    return table_[move.PerfectHash()];
+    const Gain& gain = table_[move.PerfectHash()];
+    return static_cast<Score>(gain.sum / (gain.count + 1));
   }
 
   void Update(Move move, Score score) {
     assert(move.is_quiet());
     uint32_t key = move.PerfectHash();
-    table_[key] = std::max(score, table_[key] - 1);
+    Gain gain = table_[key];
+    if (gain.count >= 256) {
+      gain.sum /= 2;
+      gain.count /= 2;
+    }
+    gain.sum += score;
+    gain.count += 1;
+    table_[key] = gain;
   }
 
   void Clear() {
     table_.clear();
   }
  private:
-  Array<Score, Move::kPerfectHashSize> table_;
+  Array<Gain, Move::kPerfectHashSize> table_;
 };
 
 /**

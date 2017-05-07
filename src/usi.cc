@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -37,9 +37,8 @@
 
 namespace {
 
-const auto kProgramName = "Gikou 20160606";
+const auto kProgramName = "Gikou 2";
 const auto kAuthorName  = "Yosuke Demura";
-const auto kBookFile = "book.bin";
 
 /**
  * USIコマンドを記憶するためのキューです.
@@ -87,7 +86,12 @@ void ReceiveCommands(CommandQueue* const queue, Thinking* const thinking) {
   assert(thinking != nullptr);
 
   // 標準入力から1行ずつ読み込む
-  for (std::string command; std::getline(std::cin, command);) {
+  for (std::string command; ;) {
+    // EOFが送られてきたときは、quitコマンドと同様の処理をしてから終了させる
+    if (!std::getline(std::cin, command)) {
+      command = "quit";
+    }
+
     std::istringstream is(command);
     std::string type;
     is >> type;
@@ -137,7 +141,7 @@ void SetUsiOption(std::istream& is, UsiOptions* const usi_options) {
     if (token == "name") {
       is >> name;
     } else if (token == "value") {
-      is >> value;
+      std::getline(is >> std::ws, value);
     }
   }
 
@@ -294,10 +298,10 @@ UsiOptions::UsiOptions() {
   map_.emplace("USI_Hash", UsiOption(256, 1, 16384)); // from 1MB to 16GB
 
   // 先読みを有効にする場合はtrue
-  map_.emplace("USI_Ponder", UsiOption(true));
+  map_.emplace("USI_Ponder", UsiOption(false));
 
   // 探索に用いるスレッド数
-  map_.emplace("Threads", UsiOption(std::thread::hardware_concurrency(), 1, kMaxSearchThreads));
+  map_.emplace("Threads", UsiOption(1, 1, kMaxSearchThreads));
 
   // USI出力するPVの数
   map_.emplace("MultiPV", UsiOption(1, 1, Move::kMaxLegalMoves));
@@ -306,34 +310,45 @@ UsiOptions::UsiOptions() {
   map_.emplace("DrawScore", UsiOption(0, -200, 200));
 
   // 秒読み時の安全マージン（単位はミリ秒）
-  map_.emplace("ByoyomiMargin", UsiOption(100, 0, 10000));
+  map_.emplace("ByoyomiMargin", UsiOption(0, 0, 10000));
 
   // フィッシャールール時の安全マージン（単位はミリ秒）
-  map_.emplace("FischerMargin", UsiOption(12000, 0, 60000));
+  map_.emplace("FischerMargin", UsiOption(0, 0, 60000));
 
   // 切れ負け対局のときに、安全のために予備的に残しておく時間（単位は秒）
-  map_.emplace("SuddenDeathMargin", UsiOption(60, 0, 600));
+  map_.emplace("SuddenDeathMargin", UsiOption(0, 0, 600));
 
   // 最小思考時間（実際には、ここから安全マージンを引いた時間だけ思考する）（単位はミリ秒）
-  map_.emplace("MinThinkingTime", UsiOption(1000, 10, 60000));
+  map_.emplace("MinThinkingTime", UsiOption(10, 10, 60000));
 
   // 定跡を使うか否か（trueならば、定跡を用いる）
   map_.emplace("OwnBook", UsiOption(true));
 
-  // 定跡を用いる最大手数
-  map_.emplace("BookMaxPly", UsiOption(50, 0, 50));
+  // 定跡ファイル
+  map_.emplace("BookFile", UsiOption("book.bin"));
 
+  // 定跡を用いる最大手数
+  map_.emplace("BookMaxPly", UsiOption(20, 0, 50));
+
+#if 0
   // 定跡手の評価値のしきい値（先手番）（先手番側から見た評価値がこの値未満の定跡手は選択しない）
-  map_.emplace("MinBookScoreForBlack", UsiOption(0, -500, 500));
+  map_.emplace("MinBookScoreForBlack", UsiOption(-300, -500, 500));
 
   // 定跡手の評価値のしきい値（後手番）（後手番側から見た評価値がこの値未満の定跡手は選択しない）
-  map_.emplace("MinBookScoreForWhite", UsiOption(-180, -500, 500));
+  map_.emplace("MinBookScoreForWhite", UsiOption(-300, -500, 500));
+#endif
 
   // 出現頻度や勝率が低い定跡を除外する場合はtrue
   map_.emplace("NarrowBook", UsiOption(false));
 
   // 勝ち数が少ない定跡を除外する場合はtrue
   map_.emplace("TinyBook", UsiOption(false));
+
+  // 読みの深さ（強さのレベル）
+  map_.emplace("DepthLimit", UsiOption(kMaxPly, 1, kMaxPly));
+
+  // 投了する評価値（評価値がこの値以下になったら、技巧が投了する）
+  map_.emplace("ResignScore", UsiOption(-10000, -kScoreInfinite, -500));
 }
 
 void UsiOptions::PrintListOfOptions() {
@@ -358,6 +373,10 @@ void UsiOptions::PrintListOfOptions() {
                     option.default_value(),
                     option.min(),
                     option.max());
+    } else if (option.type() == UsiOption::kFileName) {
+      SYNCED_PRINTF("option name %s type filename default %s\n",
+                    name.c_str(),
+                    option.default_string().c_str());
     }
   }
 }

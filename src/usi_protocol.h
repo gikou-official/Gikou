@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -43,6 +43,12 @@ struct UsiGoOptions {
 
   /** 時間無制限に考えるならばtrue */
   bool infinite = false;
+
+  /** 探索するノード数を、このノード数に制限をする */
+  uint64_t nodes = UINT64_MAX;
+
+  /** 読みの深さを、この深さに制限する */
+  int depth = kMaxPly;
 
   /** 通常のαβ探索ではなく、詰み探索を行う場合はtrue */
   bool mate = false;

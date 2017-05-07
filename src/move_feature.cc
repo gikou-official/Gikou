@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -32,217 +32,326 @@
 
 namespace {
 
-/**
- * 指し手のカテゴリを表すクラスです.
- *
- * 現在の実装では、
- *   - 駒の種類（14通り）
- *   - SEE値が負か否か（2通り）
- * の、合計28通りに場合分けを行っています。
- *
- * もっとも、計算の効率化のため、実装上は、全部で32通りあることにして計算しています。
- */
-struct MoveCategory {
- public:
-  MoveCategory(PieceType piece_type, bool is_negative_see)
-      : bitfield_(0) {
-    bitfield_.set(kKeyPieceType, piece_type);
-    bitfield_.set(kKeyNegativeSee, is_negative_see);
-  }
-
-  operator size_t() const {
-    return bitfield_;
-  }
-
-  static size_t size() {
-    return 32;
-  }
-
- private:
-  typedef BitField<uint32_t>::Key Key;
-  static_assert(std::is_same<uint32_t, MoveFeatureIndex>::value, "");
-  static constexpr Key kKeyPieceType{0, 4};
-  static constexpr Key kKeyNegativeSee{4, 5};
-
-  BitField<uint32_t> bitfield_;
-};
-
-constexpr MoveCategory::Key MoveCategory::kKeyPieceType;
-constexpr MoveCategory::Key MoveCategory::kKeyNegativeSee;
-
-const int kMinMaterialGain = -7, kMaxMaterialGain = 7;
-const int kMaxControls = 3;
-const int kMaxRelation = 152;
+typedef Number<0, 152> SquareRelation;
 
 ValarrayKeyChain key_chain;
 
 //
-// 1. 指し手の基本的なカテゴリ等
+// 探索中の情報 or 連続値を取る特徴
 //
-// バイアス項（どの指し手にも必ず特徴として入れる）
-const auto kBias = key_chain.CreateKey();
-// 駒の損得（SEEで計算したもの。「歩何枚分か」で表す）
-const auto kMaterialGain = key_chain.CreateKey<Number<kMinMaterialGain, kMaxMaterialGain>>();
-// 駒の損得 [得か、損得なしか、損か][打つ手か否か]
-const auto kSeeSign = key_chain.CreateKey<Number<-1, 1>, bool>();
-// History値（0%~100%までを、16分割する）
-const auto kHistoryValue = key_chain.CreateKey<Number<0, 15>>();
-// 評価値のgain （50点刻みで、1~800点までを16分割。gainsが負のときは何もしない。）
-const auto kEvaluationGain = key_chain.CreateKey<Number<0, 15>>();
+// killer move
+// history value（-1から+1までの連続値）
+// counter move history value（-1から+1までの連続値）
+// follow-up move history value（-1から+1までの連続値）
+// evaluation gain（-1＜龍損＞から+1＜龍得＞までの連続値）
+// SEE値（-1＜龍損＞から+1＜龍得＞までの連続値）
+// Global SEE値（-1＜龍損＞から+1＜龍得＞までの連続値）
+// 駒取りの脅威（-1＜龍損＞から0＜損なし＞までの連続値）
+
+//
+// バイアス項
+//
+// 全ての手用のバイアス項
+const auto kBiasTerm = key_chain.CreateKey();
+// 静かな手用のバイアス項
+const auto kBiasTermOfQuietMove = key_chain.CreateKey();
+
+//
+// 全ての駒種に共通する特徴
+//
+// 手を指した後、相手にタダ取りされる最高の駒
+const auto kCaptureThreatAfterMove = key_chain.CreateKey<PieceType>();
+// 手を指した後、飛車にタダで成りこまれる
+const auto kRookPromotionThreatAfterMove = key_chain.CreateKey();
+// 手を指した後、角にタダで成りこまれる
+const auto kBishopPromotionThreatAfterMove = key_chain.CreateKey();
+// 手を指した後の、敵玉の自由度
+const auto kOppKingFreedomAfterMove = key_chain.CreateKey<Number<1, 6>>();
+
+//
+// 取る手
+//
+// 取れる最高の駒を取る手（SEE>=0）
+const auto kIsCaptureOfMostValuablePiece = key_chain.CreateKey();
+// 直前に動いた駒の取り返し（SEE>=0）
+const auto kIsRecapture = key_chain.CreateKey();
+// 2手前に動いた駒で駒を取る手（SEE>=0）
+const auto kIsCaptureWithLastMovedPiece = key_chain.CreateKey();
+// 駒得の取る手 [歩何枚分の得か]
+const auto kGoodCapture = key_chain.CreateKey<Number<0, 7>>();
+// 駒交換 [交換する駒]
+const auto kEqualCapture = key_chain.CreateKey<PieceType>();
+// 駒損の取る手 [歩何枚分の損か]
+const auto kBadCapture = key_chain.CreateKey<Number<0, 7>>();
+// [取った駒]
+const auto kCapturedPiece = key_chain.CreateKey<PieceType>();
+// [動かした駒]
+const auto kMovedPieceToCapture = key_chain.CreateKey<PieceType>();
+// [動かした駒][取った駒]
+const auto kMovedPieceAndCapturedPiece = key_chain.CreateKey<PieceType, PieceType>();
+// [取った駒][段]
+const auto kCapturedPieceAndRank = key_chain.CreateKey<PieceType, Rank>();
+// [取った駒][自玉との距離]
+const auto kCapturedPieceAndDistanceToOwnKing = key_chain.CreateKey<PieceType, Number<1,8>>();
+// [取った駒][敵玉との距離]（歩・香・桂を取る手について）
+const auto kCapturedPieceAndDistanceToOppKing = key_chain.CreateKey<PieceType, Number<1,8>>();
+// [取った駒][取った駒を持ち駒に何枚持っているか]
+const auto kNumHandPiecesBeforeCapture = key_chain.CreateKey<PieceType, Number<0, 1>>();
+
+//
 // 成る手
-const auto kIsPromotion = key_chain.CreateKey();
-// 打つ手
-const auto kIsDrop = key_chain.CreateKey();
-// 打つ手の場合に、持ち駒の枚数
-const auto kNumHandPieces = key_chain.CreateKey<PieceType, Number<0, 3>>();
+//
+// 成る手 [動かした駒]
+const auto kIsPromotion = key_chain.CreateKey<PieceType>();
+// [動かした駒][敵玉との距離]
+const auto kDistanceToOppKingAfterPromotion = key_chain.CreateKey<PieceType, Number<1, 8>>();
+// [動かした駒][移動元の段]（SSE>=0のみ）
+const auto kRankBeforePromotion = key_chain.CreateKey<PieceType, Rank>();
+// [動かした駒][移動先の段]（SEE>=0のみ）
+const auto kRankAfterPromotion = key_chain.CreateKey<PieceType, Rank>();
+// 駒損の成る手 [歩何枚分の損か]
+const auto kMaterialLossAfterPromotion = key_chain.CreateKey<Number<0, 7>>();
 
 //
-// 2. 移動先・移動元のマスに関する特徴
+// 王手（打つ手か否かで場合分け？）
 //
-// 移動先・移動元の段（移動先は、打つ手か否かで場合分け）
-const auto kDstRank = key_chain.CreateKey<Rank, bool>();
-const auto kSrcRank = key_chain.CreateKey<Rank>();
-// 移動先・移動元のマス
-const auto kDstSquare = key_chain.CreateKey<Square>();
-const auto kSrcSquare = key_chain.CreateKey<Square>();
-// 移動先・移動元の周囲15マス（縦5マスx横3マス）の駒の配置パターン [方向][駒][味方の利き][敵の利き]
-const auto kDstPattern = key_chain.CreateKey<Number<0, 15>, Piece, Number<0, 1>, Number<0, 1>>();
-const auto kSrcPattern = key_chain.CreateKey<Number<0, 15>, Piece, Number<0, 1>, Number<0, 1>>();
-// 直前の相手の手との関係
-const auto kDstRelationToPreviousMove1 = key_chain.CreateKey<PieceType, Number<0, kMaxRelation>>();
-const auto kSrcRelationToPreviousMove1 = key_chain.CreateKey<PieceType, Number<0, kMaxRelation>>();
-// ２手前の自分の手との関係
-const auto kDstRelationToPreviousMove2 = key_chain.CreateKey<PieceType, Number<0, kMaxRelation>>();
-const auto kSrcRelationToPreviousMove2 = key_chain.CreateKey<PieceType, Number<0, kMaxRelation>>();
-// 移動先・移動元の、敵・味方の利き数の組み合わせ（移動先の場合は、打つ手か否かで区別）
-const auto kDstControls = key_chain.CreateKey<bool, Number<0, kMaxControls>, Number<0, kMaxControls>>();
-const auto kSrcControls = key_chain.CreateKey<Number<0, kMaxControls>, Number<0, kMaxControls>>();
-// 移動先・移動元の、敵・味方の長い利きの数
-const auto kDstLongControls = key_chain.CreateKey<Color, Number<0, kMaxControls>>();
-const auto kSrcLongControls = key_chain.CreateKey<Color, Number<0, kMaxControls>>();
-// 飛車との相対位置
-const auto kDstRelationToRook = key_chain.CreateKey<Color, Number<0, kMaxRelation>>();
-const auto kSrcRelationToRook = key_chain.CreateKey<Color, Number<0, kMaxRelation>>();
-// 自玉・敵玉との相対位置
-const auto kDstRelationToKing = key_chain.CreateKey<Color, Number<0, kMaxRelation>>();
-const auto kSrcRelationToKing = key_chain.CreateKey<Color, Number<0, kMaxRelation>>();
-// 移動先・移動元と、敵・味方近い方の玉との距離
-const auto kDstDistanceToKing = key_chain.CreateKey<Number<0, 9>>();
-const auto kSrcDistanceToKing = key_chain.CreateKey<Number<0, 9>>();
-// 敵玉のいる筋と、移動先・移動元の筋の組み合わせ
-const auto kDstFileAndOppKingFile = key_chain.CreateKey<File, File>();
-const auto kSrcFileAndOppKingFile = key_chain.CreateKey<File, File>();
-// 自玉・敵玉とのマンハッタン距離の増減
-const auto kDistanceToKingDelta = key_chain.CreateKey<Color, Number<-1, 1>>();
+// a. 開き王手（SEE値で場合分けしない） [王手した駒]
+const auto kIsDiscoveredCheck = key_chain.CreateKey<PieceType>();
+// b. SEE>=0の王手 [王手した駒]
+const auto kIsGoodCheck = key_chain.CreateKey<PieceType>();
+// c. SEE<0の王手 [王手した駒]
+const auto kIsBadCheck = key_chain.CreateKey<PieceType>();
+// d. タダ取りされる王手 [王手した駒]
+const auto kIsSacrificeCheck = key_chain.CreateKey<PieceType>();
+// 駒損の王手 [歩何枚分の損か]
+const auto kMaterialLossAfterCheck = key_chain.CreateKey<Number<0, 7>>();
+// 王手後の敵玉の自由度 [敵玉の自由度]
+const auto kOppKingFreedomAfterGoodCheck = key_chain.CreateKey<Number<1, 6>>();
+const auto kOppKingFreedomAfterBadCheck = key_chain.CreateKey<Number<1, 6>>();
+const auto kOppKingFreedomAfterSacrificeCheck = key_chain.CreateKey<Number<1, 6>>();
 
 //
-// 3. 取る手に関する特徴
+// 王手回避手
 //
-// 取る手か否か
-const auto kIsCapture = key_chain.CreateKey();
-// 取る手の損得
-const auto kCaptureGain = key_chain.CreateKey<Number<kMinMaterialGain, kMaxMaterialGain>>();
-// 取った駒の種類（SEEの符号で場合分け）
-const auto kCapturedPieceType = key_chain.CreateKey<Number<-1, 1>, PieceType>();
-// 取れる最高の駒を取る手（SEEの符号で場合分け）
-const auto kIsCaptureOfMostValuablePiece = key_chain.CreateKey<Number<-1, 1>>();
-// 直前に動いた駒の取り返し（SEEの符号で場合分け）
-const auto kIsRecapture = key_chain.CreateKey<Number<-1, 1>>();
-// 2手前に動いた駒で駒を取る手（SEEの符号で場合分け）
-const auto kIsCaptureByLastMovedPiece = key_chain.CreateKey<Number<-1, 1>>();
+// 取る手の場合に、動かす駒
+const auto kIsCaptureOfChecker = key_chain.CreateKey<PieceType>();
+// 玉が逃げる手の場合に、移動後の玉の自由度（1から6まで）
+const auto kKingFreedomAfterEvasion = key_chain.CreateKey<Number<1, 6>>();
+// 合駒の場合に、合駒する駒の種類
+const auto kIsInterception = key_chain.CreateKey<PieceType>();
+// 合駒の場合に、合駒と玉との距離（1から3まで）
+const auto kDistanceBetweenKingAndInterceptor = key_chain.CreateKey<Number<1, 3>>();
+// 中合いの場合に、合駒する駒の種類
+const auto kIsChuai = key_chain.CreateKey<PieceType>();
+// 中合いの場合に、合駒と玉との距離（2から4まで）
+const auto kDistanceBetweenKingAndChuaiPiece = key_chain.CreateKey<Number<2, 4>>();
 
 //
-// 4. 王手に関する特徴
+// 攻める手
 //
-// 王手か否か
-const auto kGivesCheck = key_chain.CreateKey();
-// 有効王手（相手から取り返されない位置にする王手）か否か
-const auto kEffectiveCheck = key_chain.CreateKey();
-// 開き王手か否か
-const auto kDiscoveredCheck = key_chain.CreateKey();
-// ただ捨ての王手か否か
-const auto kSacrificeCheck = key_chain.CreateKey();
-// 送りの手筋の王手（玉が取り返すと、相手の駒を取れるかどうか）[取れる相手の駒の種類]
-const auto kSendOffCheck = key_chain.CreateKey<PieceType>();
+// 長い利きによる当たり [動かした駒][利きを付けた駒][味方の利きの有無][敵の利きの有無]
+const auto kDstLongAttack = key_chain.CreateKey<PieceType, Piece, Number<0, 1>, Number<0, 1>>();
+const auto kSrcLongAttack = key_chain.CreateKey<PieceType, Piece, Number<0, 1>, Number<0, 1>>();
+// 空き当たり [動かした駒][利きを付けた駒][味方の利きの有無][敵の利きの有無]
+const auto kDiscoveredAttack = key_chain.CreateKey<PieceType, Piece, Number<0, 1>, Number<0, 1>>();
+// ピンしている駒に対する当たり [動かした駒][利きを付けた駒]
+const auto kAttackToPinnedPieces = key_chain.CreateKey<PieceType, PieceType>();
+// 両取りの手 [指した駒][当たりを付けた駒のうち、２番目に価値が高い相手の駒]
+const auto kDoubleAttack = key_chain.CreateKey<PieceType, PieceType>();
+// 同〜と取り返してきたら取れる最高の駒 [犠牲にする駒][取れる最高の相手駒]
+const auto kCaptureAfterSacrifice = key_chain.CreateKey<PieceType, PieceType>();
 
 //
-// 5. 王手回避手に関する特徴
+// 受ける手
 //
-// 王手を回避する手か否か
-const auto kIsEvasion = key_chain.CreateKey();
-// 王手している駒を取る手（王手駒の種類で場合分け）
-const auto kCaptureChecker = key_chain.CreateKey<PieceType>();
-// 玉が逃げる手の場合に、玉が逃げるY軸方向（上か、横か、下か）
-const auto kEvasionDirection = key_chain.CreateKey<Number<-1, 1>>();
-// 合駒の場合に、合駒と玉との距離（1から8まで）
-const auto kInterceptionDistance = key_chain.CreateKey<Number<1, 8>>();
-// 合駒の場合に、王手している相手の駒の種類
-const auto kCheckerType = key_chain.CreateKey<PieceType>();
+// 取られそうな最高の駒を逃げる手（SSE>=0）
+const auto kEscapeMoveOfMostValuablePiece = key_chain.CreateKey();
+// 取られそうな駒を逃げる手（SEE>=0）[動かした駒]
+const auto kEscapeMove = key_chain.CreateKey<PieceType>();
+// 駒が取られそうな場合に、合駒をして守る手 [合駒した駒][守った駒]
+const auto kInterceptionDefense = key_chain.CreateKey<PieceType, PieceType>();
 
 //
-// 6. 攻める手に関する特徴
+// 自玉周り
 //
-// 利きを付けた駒の種類 [利きを付けた駒][味方の利きの有無][敵の利きの有無]
-const auto kAttackToPiece = key_chain.CreateKey<Piece, bool, bool>();
-// ピンしている駒に対する当たり [利きを付けた駒の種類]
-const auto kAttackToPinnedPiece = key_chain.CreateKey<PieceType>();
-// 当たりを付けた駒のうち、最も価値が高い相手の駒 [敵の利きの有無]
-const auto kMostValuableAttack1 = key_chain.CreateKey<PieceType, bool>();
-//　当たりを付けた駒のうち、２番目に価値が高い相手の駒 [敵の利きの有無]（駒の両取りを意識）
-const auto kMostValuableAttack2 = key_chain.CreateKey<PieceType, bool>();
-// そっぽ手判定 [相手玉との距離][利きを付けた駒の種類]
-const auto kDistanceBetweenKingAndVictim = key_chain.CreateKey<Number<1, 9>, PieceType>();
-// 空き当たり [駒の種類][相手の利きの有無]
-const auto kDiscoveredAttack = key_chain.CreateKey<PieceType, bool>();
-// 大駒を敵陣に打ち込む手 [min(安全に成れるマスの数, 7)]
-const auto kDropToOpponentArea = key_chain.CreateKey<Number<0, 7>>();
-// 駒を成る手 [相手玉との距離]
-const auto kDistanceToKingWhenPromotion = key_chain.CreateKey<Number<1, 9>>();
-// 相手の歩のない筋で、味方飛香の利きにある歩を５段目より前に動かす手
-const auto kAdvancingPawn = key_chain.CreateKey();
+// 自玉の８近傍への飛び利きを遮る手（打つ手のみ） [駒の種類]
+const auto kBlockOfLongAttacksToOwnCastle = key_chain.CreateKey<PieceType>();
+// 自玉の８近傍に利きを足す手（打つ手のみ）（味方の利きより相手の利きが多いマスに利きを足す）[駒の種類]
+const auto kReinforcementOfOurCastle = key_chain.CreateKey<PieceType>();
 
 //
-// 7. 受ける手に関する特徴
+// 敵玉周り
 //
-// 駒取りを防ぐ
-//   取られそうな最高の駒を逃げる手
-const auto kDefendMostValuablePiece = key_chain.CreateKey();
-//   取られそうな最高の駒に、利きを足して守る手（取られそうな駒の種類、味方の利きの有無で場合分け）
-const auto kSupportMostValuablePiece = key_chain.CreateKey<PieceType, bool>();
-//   直前の相手の手で当たりにされた最高の駒が逃げる手（相手が動かした駒の種類で場合分け）
-const auto kDefendPiecesAttackedByLastMove = key_chain.CreateKey<PieceType>();
-//   直前の相手の手で取られそうな最高の駒に、合駒をして守る手（相手が動かした駒の種類で場合分け）
-const auto kInterceptAttacks = key_chain.CreateKey<PieceType>();
-//   直前の相手の手で取られそうな最高の駒に、利きを足して守る手（相手が動かした駒の種類、味方の利きの有無で場合分け）
-const auto kSupportPiecesAttackedByLastMove = key_chain.CreateKey<PieceType, bool>();
+// 敵玉８近傍に利きを足す手（飛び駒のみ）
+const auto kAttackToOppKingNeighbor8 = key_chain.CreateKey();
 
 //
-// 8. 自玉周り
+// 利き関係
 //
-// 自玉の８近傍に利きをつけている相手の飛角に合駒をする手 [打つ手かどうか]
-const auto kInterceptAttacksToOurCastle = key_chain.CreateKey<bool>();
-// 自玉の８近傍に利きを足す手（味方の利きよりも、相手の利きのほうが多い場合のみ）[打つ手かどうか]
-const auto kReinforceOurCastle = key_chain.CreateKey<bool>();
-// 相手が持ち駒で自玉に有効王手をかけることができるマスに、先に駒を打って埋める手
-const auto kObstructOpponentEffectiveChecks = key_chain.CreateKey();
+// ＜ExtendedBoardを使ったGlobal Evaluation＞
+// 新たに利きを付けた相手の駒
+const auto kNewAttackToOppPiece = key_chain.CreateKey<PieceType>();
+// 新たにひもを付けた味方の駒
+const auto kNewTieToOwnPiece = key_chain.CreateKey<PieceType>();
+// 利きが外れた相手の駒
+const auto kRemovedAttackToOppPiece = key_chain.CreateKey<PieceType>();
+// ひもが外れた味方の駒
+const auto kRemovedTieToOwnPiece = key_chain.CreateKey<PieceType>();
+// 手を指した後、相手がパスした場合、タダ取りできる最高の駒
+const auto kNextGoodCapture = key_chain.CreateKey<PieceType>();
 
 //
-// 9. 相手玉周り
+// 移動手の特徴
 //
-// 相手玉周りに利きをつける手（8近傍、24近傍）
-const auto kAttackToKingNeighborhood8 = key_chain.CreateKey();
-const auto kAttackToKingNeighborhood24 = key_chain.CreateKey();
-// 相手玉の24近傍にある、相手の金・銀に当たりをかける手
-const auto kAttackToGoldNearKing = key_chain.CreateKey();
-const auto kAttackToSilverNearKing = key_chain.CreateKey();
+// 移動方向（前か、横か、後ろか） [指した駒][移動元の段][Y座標の増減]
+const auto kDeltaCoordinateY = key_chain.CreateKey<PieceType, Rank, Number<-1, 1>>();
+// 5筋とのX距離の増減 [指した駒][5筋とのX距離の増減]
+const auto kDeltaDistanceFromCenter = key_chain.CreateKey<PieceType, Number<-1, 1>>();
+// そっぽ手判定（自陣の駒） [指した駒][移動元と自玉とのX距離][自玉とのX距離の増減]
+const auto kIsGoingAwayFromOwnKing = key_chain.CreateKey<PieceType, Number<0, 7>, Number<-1, 1>>();
+// そっぽ手判定（敵陣の駒） [指した駒][移動元と敵玉とのX距離][敵玉とのX距離の増減]
+const auto kIsGoingAwayFromOppKing = key_chain.CreateKey<PieceType, Number<0, 7>, Number<-1, 1>>();
+// 動くと取られてしまう最高の駒（原因：ピン） [指した駒][取られそうな駒]
+const auto kOpponentXrayThreat = key_chain.CreateKey<PieceType, PieceType>();
+// 駒の自由度 [指した駒][相手の利きがなく、移動可能なマス]
+const auto kDegreeOfLibertyAfterMove = key_chain.CreateKey<PieceType, Number<0, 12>>();
+// 2手前に動かした駒を動かす手 [指した駒][元いたマスに戻る手か否か]（SEE=0のみ）
+const auto kSuccessiveMoveOfSamePiece = key_chain.CreateKey<PieceType>();
+// 自陣の駒打ちのスキを増やしてしまう手 [指す駒][相手の持ち駒][スキが増えるか否か]
+const auto kMakesHolesInOurArea = key_chain.CreateKey<PieceType, PieceType, bool>();
+
+//
+// 打つ手の特徴
+//
+// 持ち駒の枚数 [打つ駒][持ち駒の枚数]
+const auto kNumHandPieces = key_chain.CreateKey<PieceType, Number<1, 3>>();
+// 安全に成れるマスの数 [打つ駒][安全に成れるマスの数]
+const auto kNumSafePromotions = key_chain.CreateKey<PieceType, Number<0, 4>>();
+// 駒の自由度 [打つ駒][相手の利きがなく、移動可能なマス]
+const auto kDegreeOfLibertyAfterDrop = key_chain.CreateKey<PieceType, Number<0, 12>>();
+
+//
+// パターン
+//
+// 駒が安全に移動できるマスのパターン [指した駒][段][安全に移動できるマスのパターン]
+const auto kPatternOfSafeMoves = key_chain.CreateKey<PieceType, Rank, DirectionSet>();
+
+//
+// 移動先・移動元に関する特徴
+// （移動元：old_extended_boardで評価、移動先：new_extended_boardで評価）
+//
+// 段 [指した駒][段]
+const auto kDropRank = key_chain.CreateKey<PieceType, Rank>();
+// マス
+// 周囲15マス（縦5マスx横3マス）の駒の配置 [指した駒][方向（左右対称）][近傍の駒]
+const auto kSrcNeighbors = key_chain.CreateKey<PieceType, Number<0, 9>, Piece, Number<0, 1>, Number<0, 1>>();
+const auto kDstNeighbors = key_chain.CreateKey<PieceType, Number<0, 9>, Piece, Number<0, 1>, Number<0, 1>>();
+const auto kDropNeighbors = key_chain.CreateKey<PieceType, Number<0, 9>, Piece, Number<0, 1>, Number<0, 1>>();
+// 周囲8マス（縦3マスx横3マス）の駒の配置（段ごとに場合分け） [指した駒][段][方向（左右対称）][近傍の駒]
+const auto kSrcNeighborsAndRank = key_chain.CreateKey<PieceType, Rank, Number<0, 5>, Piece>();
+const auto kDstNeighborsAndRank = key_chain.CreateKey<PieceType, Rank, Number<0, 5>, Piece>();
+const auto kDropNeighborsAndRank = key_chain.CreateKey<PieceType, Rank, Number<0, 5>, Piece>();
+// 敵・味方の利き数の組み合わせ [指した駒][味方の利き数（最大2）][敵の利き数（最大2）]
+const auto kSrcControls = key_chain.CreateKey<PieceType, Number<0, 2>, Number<0, 2>>();
+const auto kDstControls = key_chain.CreateKey<PieceType, Number<0, 2>, Number<0, 2>>();
+const auto kDropControls = key_chain.CreateKey<PieceType, Number<0, 2>, Number<0, 2>>();
+// 駒を打ったマスの、敵・味方の長い利きの数（0から2まで） [打った駒][利き数（最大2）]
+const auto kDropOwnLongControls = key_chain.CreateKey<PieceType, Number<0, 2>>();
+const auto kDropOppLongControls = key_chain.CreateKey<PieceType, Number<0, 2>>();
+// 飛車・龍との相対位置
+const auto kSrcRelationToOwnRook = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kSrcRelationToOppRook = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDstRelationToOwnRook = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDstRelationToOppRook = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDropRelationToOwnRook = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDropRelationToOppRook = key_chain.CreateKey<PieceType, SquareRelation>();
+// 自玉との相対位置
+const auto kSrcRelationToOwnKing = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDstRelationToOwnKing = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDropRelationToOwnKing = key_chain.CreateKey<PieceType, SquareRelation>();
+// 敵玉との相対位置
+const auto kSrcRelationToOppKing = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDstRelationToOppKing = key_chain.CreateKey<PieceType, SquareRelation>();
+const auto kDropRelationToOppKing = key_chain.CreateKey<PieceType, SquareRelation>();
+// 自玉との絶対位置 [自玉の位置][指した駒][マス]
+const auto kSrcAbsRelationToOwnKing = key_chain.CreateKey<Square, PieceType, Square>();
+const auto kDstAbsRelationToOwnKing = key_chain.CreateKey<Square, PieceType, Square>();
+const auto kDropAbsRelationToOwnKing = key_chain.CreateKey<Square, PieceType, Square>();
+// 敵玉との絶対位置 [敵玉の位置][指した駒][マス]
+const auto kSrcAbsRelationToOppKing = key_chain.CreateKey<Square, PieceType, Square>();
+const auto kDstAbsRelationToOppKing = key_chain.CreateKey<Square, PieceType, Square>();
+const auto kDropAbsRelationToOppKing = key_chain.CreateKey<Square, PieceType, Square>();
+
+//
+// 過去の手との関係
+//
+// 1手前との関係 [今回指した駒][１手前に指した駒][1手前の移動先との位置関係]
+const auto kSrcRelationToPreviousMove1 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDstRelationToPreviousMove1 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDropRelationToPreviousMove1 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+// 2手前との関係 [今回指した駒][2手前に指した駒][2手前の移動先との位置関係]
+const auto kSrcRelationToPreviousMove2 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDstRelationToPreviousMove2 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDropRelationToPreviousMove2 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+// 3手前との関係 [今回指した駒][3手前に指した駒][3手前の移動先との位置関係]
+const auto kSrcRelationToPreviousMove3 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDstRelationToPreviousMove3 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDropRelationToPreviousMove3 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+// 4手前との関係 [今回指した駒][4手前に指した駒][4手前の移動先との位置関係]
+const auto kSrcRelationToPreviousMove4 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDstRelationToPreviousMove4 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+const auto kDropRelationToPreviousMove4 = key_chain.CreateKey<PieceType, PieceType, SquareRelation>();
+
+//
+// 悪形手（分類性能確認済み）
+//
+// 敵飛先の敵歩前に歩を突く
+const auto kPawnPushToOppRook = key_chain.CreateKey();
+
+//
+// 悪形手（KFEnd）
+//
+// 1. 歩の成り捨て
+// 2. 端歩の突き捨て
+// 3. 自玉の頭の歩突き
+// 4. 敵飛先の敵歩前に歩を突く
+// 5. 自らの飛筋を止める歩を打つ
+// 6. 中盤における自陣1段目への歩打ち -> 「N段目への駒打ち」に一般化
+// 7. 香の不成 -> 各駒ごとの「不成」に一般化
+// 8. 桂の高跳び
+// 9. 自陣1、2段目に桂を打つ -> 「N段目への駒打ち」に一般化
+// 10. 序中盤における銀の後退 -> 「N段目が移動元の場合の，Y座標の増減」に一般化
+// 11. 金の敵陣1段目への打ち込み ->　「N段目への駒打ち」に一般化
+// 12. 自玉から2ます離れた金を玉から離れるように移動する -> そっぽ手
+// 13. 金銀の自陣1段目への後退 -> 「N段目が移動元の場合の，Y座標の増減」として一般化
+// 14. 玉に近接する金銀を玉から離れるように移動する -> そっぽ手
+// 15. 歩の叩きに対して自玉のそばの金銀が逃げる -> 逃げる手[自玉との距離]
+// 16. 自玉周辺への過剰な金銀打ち
+// 17. 双方の玉から離れた位置に金銀を打つ -> そっぽ手
+// 18. 自歩先の飛 -> どの段かで意味が違いそう。　段に意味ないなら3x3パターンでも可？
+// 19. 飛を自陣3段目に移動する -> 「移動後の飛車の自由度ないし利き」に一般化？
+// 20. 振飛車時、敵飛先の角交換に備えた飛を他の所に移動する
+// 21. 飛の隠居
+//     自陣で飛が追われたとき、なるべく敵陣に利きが通りやすいところに逃げるようにする。
+//     -> 「移動後の飛車の自由度ないし利き」に一般化？
+// 22. 振飛車時、敵飛前での角の後退
+// 23. 自陣への飛、角の打ち込み -> 「N段目への駒打ち」に一般化
+// 24. 玉を自陣3段目に上がる -> 「N段目が移動元の場合の，Y座標の増減」に一般化
+// 25. 玉が自陣2段目から1段目に移動する
+//     -> 「N段目が移動元の場合の，Y座標の増減」に一般化
+//     -> これを入れる場合，穴熊だけは例外扱いしたほうがよさそう。
+// 26. 玉が中央に移動する -> 「５筋とのX距離の増減」として一般化
+// 27. 囲いを崩す（矢倉、美濃、穴熊、銀冠、金無双、舟囲いに対応）
+// 28. 自陣の端に移動する
+// 29. 壁形を作る
+// 30. 壁銀を残す桂、金の移動
+
 
 //
 // 10. 歩の手筋
 //
-// 歩交換 [min(持ち駒の歩の枚数, 3)]
-const auto kExchangePawn = key_chain.CreateKey<Number<0, 3>>();
-// 直射止めの歩（相手の飛・香の、自陣に対する利きを遮る手）
-const auto kInterceptAttacksToOurAreaByPawn = key_chain.CreateKey();
+// 直射止めの歩（相手の飛・香の、自陣または味方の駒への直射を止める歩を打つ手）
+const auto kPawnDropInterception = key_chain.CreateKey();
 // 垂れ歩（２〜４段目に、敵の駒に当てないで歩を打つ手）[ひとつ上の味方の利きの有無][同・敵の利きの有無]
 const auto kDanglingPawn = key_chain.CreateKey<bool, bool>();
 // 底歩を打って、飛車の横利きを止める手 [上にある駒]
@@ -256,7 +365,7 @@ const auto kSuccessivePawnDrops = key_chain.CreateKey<Number<1, 8>>();
 // 銀バサミの歩
 const auto kSilverPincerPawn = key_chain.CreateKey();
 // 蓋歩（敵の飛車の退路を断つ歩）
-const auto kCutOffTheRookRetreatByPawn = key_chain.CreateKey();
+const auto kRookRetreatCutOffByPawn = key_chain.CreateKey();
 // 控えの歩（自陣において、敵駒に当てないで打つ歩）[ひとつ上の味方の利きの有無][同・敵の利きの有無]
 const auto kPawnTowardsTheRear = key_chain.CreateKey<bool, bool>();
 // 端歩を突く手 [玉とのX距離]
@@ -269,8 +378,9 @@ const auto kEdgePawnAttackWithHandKnights = key_chain.CreateKey<Number<0, 3>>();
 const auto kAttackToKnightByPawn = key_chain.CreateKey<Number<0, 2>>();
 // 同〜と取られたら、次に桂頭に歩を打てる手
 const auto kPawnSacrificeBeforeAttackToKnight = key_chain.CreateKey();
-// 味方の飛角の利きを止めている敵の歩に対して、歩で当たりをかける手 [飛角の利きの先にある駒][その駒への味方の利きの有無][同・敵の利きの有無]
-const auto kAttackToObstructingPawn = key_chain.CreateKey<Piece, bool, bool>();
+// 味方の飛角の利きを止めている敵の歩に対して、歩で当たりをかける手 [タダ取りされる手か否か]
+const auto kAttackToObstructingPawn = key_chain.CreateKey<bool>();
+// 相手の歩のない筋で、味方飛香の利きにある歩を５段目より前に動かす手
 
 //
 // 11. 香の手筋
@@ -290,14 +400,223 @@ const auto kFloatingLance = key_chain.CreateKey();
 // 控えの桂（駒損しない、打つ手のみ）[桂が跳ねれば当たりになる相手の駒]
 const auto kKnightTowardsTheRear = key_chain.CreateKey<PieceType>();
 
+// 玉の手筋
+// 玉を動かす手の場合に、5筋とのX距離の増減
+
+template<typename T>
+PieceType GetMostValuablePieceType(Bitboard pieces, const T& board) {
+  PieceType most_valuable_pt = kNoPieceType;
+  Score max_value = kScoreZero;
+  pieces.ForEach([&](Square s) {
+    PieceType pt = board.piece_on(s).type();
+    Score value = Material::exchange_value(pt);
+    if (value > max_value) {
+      most_valuable_pt = pt;
+      max_value = value;
+    }
+  });
+  return most_valuable_pt;
+}
+
+template<typename T>
+PieceType GetLeastValuablePieceType(Bitboard pieces, const T& board) {
+  PieceType least_valuable_pt = kNoPieceType;
+  Score min_value = kScoreInfinite;
+  pieces.ForEach([&](Square s) {
+    PieceType pt = board.piece_on(s).type();
+    Score value = Material::exchange_value(pt);
+    if (value < min_value) {
+      least_valuable_pt = pt;
+      min_value = value;
+    }
+  });
+  return least_valuable_pt;
+}
+
+ExtendedBoard GetNewExtendedBoard(const ExtendedBoard& old_eb, Move move) {
+  ExtendedBoard new_eb = old_eb;
+
+  if (move.is_capture()) {
+    new_eb.MakeCaptureMove(move);
+  } else if (move.is_drop()) {
+    new_eb.MakeDropMove(move);
+  } else {
+    new_eb.MakeNonCaptureMove(move);
+  }
+
+  return new_eb;
+}
+
+int GetDegreeOfFreedom(Square ksq, Bitboard attacker_controls) {
+  Bitboard edges = file_bb(kFile1) | file_bb(kFile9) | rank_bb(kRank1) | rank_bb(kRank9);
+  Bitboard king_neighbors = neighborhood8_bb(ksq);
+  Bitboard safe_neighbors = king_neighbors.andnot(attacker_controls);
+  return safe_neighbors.andnot(edges).count() + int((safe_neighbors & edges).any());
+}
+
+template<typename T>
+inline T min_max(T value, T min, T max) {
+  return std::min(std::max(value, min), max);
+}
+
+bool IsSacrificeMove(Move move, const Position& pos) {
+  Color stm = pos.side_to_move();
+  Square to = move.to();
+
+  if (move.is_drop()) {
+    // 移動先に敵の利きがある and 移動先に味方の駒の利きがない
+    return pos.num_controls(~stm, to) >= 1
+        && pos.num_controls(stm, to) == 0;
+
+  } else {
+    // 移動先に敵の利きがある and 移動先に他の味方の駒の利きがない
+    if (   pos.num_controls(~stm, to) >= 1
+        && pos.num_controls(stm, to) == 1) {
+
+      // 移動元に飛び駒の利きがない or 移動先方向に飛び駒の利きがない
+      Square from = move.from();
+      DirectionSet long_controls = pos.long_controls(stm, from);
+      return long_controls.none()
+          || !direction_bb(from, long_controls).test(to);
+    }
+
+    return false;
+  }
+}
+
+bool IsDiscoveredCheck(Move move, const Position& pos) {
+  Square opp_ksq = pos.king_square(~pos.side_to_move());
+  return !move.is_drop()
+      && pos.discovered_check_candidates().test(move.from())
+      && !line_bb(move.from(), opp_ksq).test(move.to());
+}
+
+bool IsSendOffCheck(Move move, const Position& pos) {
+  if (!move.is_drop()) {
+    return false;
+  }
+
+  Color stm = pos.side_to_move();
+  Square opp_ksq = pos.king_square(~stm);
+  Bitboard opp_king_neighbors8 = neighborhood8_bb(opp_ksq);
+  const ExtendedBoard& eb = pos.extended_board();
+
+  if (   opp_king_neighbors8.test(move.to())
+      && pos.num_controls(stm, move.to()) == 0
+      && opp_king_neighbors8.test(pos.pieces(~stm))) {
+
+    // 玉しか利きがついていない駒を目標に定める
+    EightNeighborhoods own_controls = eb.GetEightNeighborhoodControls(stm, opp_ksq);
+    EightNeighborhoods opp_controls = eb.GetEightNeighborhoodControls(~stm, opp_ksq);
+    Bitboard own_attacks = direction_bb(opp_ksq, own_controls.more_than(0));
+    Bitboard opp_defenses = direction_bb(opp_ksq, opp_controls.more_than(1));
+    Bitboard target = (pos.pieces(~stm) & own_attacks).andnot(opp_defenses);
+
+    // 玉しか利きがない駒があれば、玉の利きが外れるか否かを調べる
+    if (target.any()) {
+      Bitboard old_king_attacks = opp_king_neighbors8;
+      Bitboard new_king_attacks = neighborhood8_bb(move.to());
+      Bitboard no_king_attack = old_king_attacks.andnot(new_king_attacks);
+      return (target & no_king_attack).any();
+    }
+  }
+
+  return false;
+}
+
+bool BlocksLongAttacksToOwnCastle(Move move, const Position& pos) {
+  assert(move.is_drop());
+
+  Color stm = pos.side_to_move();
+  const ExtendedBoard& old_eb = pos.extended_board();
+  ExtendedBoard new_eb = pos.extended_board();
+  Bitboard own_king_neighbors = neighborhood8_bb(pos.king_square(stm));
+
+    new_eb.MakeDropMove(move);
+
+  if (old_eb.long_controls(~stm, move.to()).any()) {
+    bool more_opp_attack = false;
+    bool less_opp_attack = false;
+    own_king_neighbors.ForEach([&](Square s) {
+      if (new_eb.num_controls(~stm, s) > old_eb.num_controls(~stm, s)) {
+        more_opp_attack = true;
+      } else if (new_eb.num_controls(~stm, s) < old_eb.num_controls(~stm, s)) {
+        less_opp_attack = true;
+      }
+    });
+    return !more_opp_attack && less_opp_attack;
+  }
+
+  return false;
+}
+
+inline Score EvaluateThreat(Move move, const Position& pos) {
+  if (move.is_drop()) {
+    return kScoreZero;
+  } else {
+    // 今駒を打ったかのようにして、仮想手を作る
+    //（現実に存在しない手なので、通常のコンストラクタではなくファクトリ関数を使い、assertチェックの対象外にする。）
+    Move pseudo_move = Move::Create(move.piece(), move.from());
+
+    // 仮想手のSEE値を求めることで、今その駒が駒取りの脅威を受けているかが分かる
+    return -Swap::Evaluate(pseudo_move, pos);
+  }
+}
+
+bool IsInterceptionDefense(Move move, Square victim_sq, const Position& pos) {
+  Color stm = pos.side_to_move();
+  DirectionSet long_attacks = pos.extended_board().long_controls(~stm, victim_sq);
+  if (long_attacks.any()) {
+    Bitboard attackers = pos.SlidersAttackingTo(victim_sq, pos.pieces(), ~stm);
+    while (attackers.any()) {
+      Square attacker_sq = attackers.pop_first_one();
+      if (between_bb(attacker_sq, victim_sq).test(move.to())) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool IsPawnPushToOppRook(Move move, const Position& pos) {
+  if (move.piece_type() == kPawn || move.is_drop()) {
+    return false;
+  }
+
+  Color stm = pos.side_to_move();
+  Bitboard opp_rooks_on_same_file = file_bb(move.from().file())
+                                  & pos.pieces(~stm, kRook);
+  if (opp_rooks_on_same_file.any()) {
+    Square rook_sq = opp_rooks_on_same_file.first_one();
+    Bitboard front = max_attacks_bb(Piece(~stm, kLance), rook_sq);
+    Bitboard between = between_bb(move.from(), rook_sq);
+    return (pos.pieces(~stm, kPawn) & front & between).any();
+  }
+
+  return false;
+}
+
+bool IsPawnDropInterruptingOwnRook(Move move, const Position& pos) {
+  if (move.piece_type() != kPawn || !move.is_drop()) {
+    return false;
+  }
+
+  Color stm = pos.side_to_move();
+  Bitboard own_rooks = pos.pieces(stm, kRook);
+  if (own_rooks.any()) {
+    Square rook_sq = own_rooks.first_one();
+    Bitboard front = lance_attacks_bb(rook_sq, pos.pieces(), stm);
+    return front.test(move.to())
+        && pos.num_controls(~stm, move.to()) == 0;
+  }
+
+  return false;
+}
+
 } // namespace
 
-const int kNumMoveFeatures =
-      2 * Move::kPerfectHashSize // 指し手の完全ハッシュを格納する
-    + MoveCategory::size() * key_chain.total_size_of_keys()
-    + 1; // History値を格納する
-
-const int kHistoryFeatureIndex = kNumMoveFeatures - 1;
+const int kNumBinaryMoveFeatures = key_chain.total_size_of_keys();
+const int kNumMoveFeatures = kNumBinaryMoveFeatures + kNumContinuousMoveFeatures;
 
 template<Color kColor>
 MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
@@ -306,734 +625,1073 @@ MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
 
   MoveFeatureList feature_list;
 
-  const ExtendedBoard& ext_board = pos.extended_board();
+  const ExtendedBoard& old_eb = pos.extended_board();
+  const ExtendedBoard new_eb = GetNewExtendedBoard(old_eb, move);
 
+  const Square dst = move.to().relative_square(kColor);
+  const Square src = move.is_drop() ? kSquareNone : move.from().relative_square(kColor);
+
+  // 移動先・移動元のビットボード
+  const Bitboard to_bb = square_bb(move.to());
+  const Bitboard from_bb = move.is_drop() ? Bitboard() : square_bb(move.from());
+
+  // 駒のあるマスのビットボード（指す前、指した後）
+  const Bitboard old_occ = pos.pieces();
+  const Bitboard new_occ = (old_occ | to_bb).andnot(from_bb);
+  const Bitboard old_own_pieces = pos.pieces(kColor);
+  const Bitboard old_opp_pieces = pos.pieces(~kColor);
+  const Bitboard new_own_pieces = (old_own_pieces | to_bb).andnot(from_bb);
+  const Bitboard new_opp_pieces = old_opp_pieces.andnot(to_bb);
+
+  // 利きのあるマスのビットボード（指す前、指した後）
+  const Bitboard old_own_controls = old_eb.GetControlledSquares(kColor);
+  const Bitboard old_opp_controls = old_eb.GetControlledSquares(~kColor);
+  const Bitboard new_own_controls = new_eb.GetControlledSquares(kColor);
+  const Bitboard new_opp_controls = new_eb.GetControlledSquares(~kColor);
+
+  // 自玉・敵玉の位置
   const Square own_ksq = pos.king_square(kColor);
   const Square opp_ksq = pos.king_square(~kColor);
 
   const Score see_score = Swap::Evaluate(move, pos);
   const int see_sign = math::sign(int(see_score));
-  const int see_is_negative = see_score < kScoreZero;
-  const int material_gain = std::min(std::max(int(see_score / 200), kMinMaterialGain), kMaxMaterialGain);
 
+  // 直近4手
   const Move previous_move1 = pos.last_move();
   const Move previous_move2 = pos.move_before_n_ply(2);
+  const Move previous_move3 = pos.move_before_n_ply(3);
+  const Move previous_move4 = pos.move_before_n_ply(4);
 
   // 動かした駒の利き
-  const Bitboard attacks = AttacksFrom(move.piece_after_move(), move.to(), pos.pieces());
+  const PieceType pt = move.piece_type();
+  const Bitboard old_attacks = move.is_drop() ? Bitboard() : AttacksFrom(move.piece(), move.from(), old_occ);
+  const Bitboard new_attacks = AttacksFrom(move.piece_after_move(), move.to(), new_occ);
 
-  if (move.is_quiet()) {
-    // History値
-    feature_list.history = double(pos_info.history[move]) / double(HistoryStats::kMax);
+  // 王手か否か
+  const bool move_gives_check = pos.MoveGivesCheck(move);
 
-    // 指し手そのもの
-    int negative_see_flag = see_is_negative * Move::kPerfectHashSize;
-    feature_list.push_back(negative_see_flag + move.PerfectHash());
-  } else {
-    // History値
-    feature_list.history = 0.0; // 特徴が存在しないのと同じにする
-  }
-
-  // 指し手のカテゴリを特定
-  const PieceType piece_type = move.piece_type();
-  const size_t key_start = 2 * Move::kPerfectHashSize;
-  const MoveCategory category(piece_type, see_is_negative);
-  const size_t key_offset = key_start + category * key_chain.total_size_of_keys();
-
-  // 以後は、同じ特徴でも、[駒の種類][駒損手か否か]によって異なるインデックスを割り当てる
   auto add_feature = [&](size_t index) {
-    feature_list.push_back(key_offset + index);
+    feature_list.push_back(index);
   };
 
   //
-  // 1. 指し手の基本的なカテゴリ等
+  // 一般的な特徴や、連続値を取る特徴
   //
   {
-    // バイアス項（どの指し手にも必ず特徴として入れる）
-    add_feature(kBias());
+    const float kMaterialScale = 1.0f / float(Material::exchange_value(kDragon));
+    const float kHistoryScale = 1.0f / float(HistoryStats::kMax);
 
-    // 駒の損得（SEEで計算したもの。「歩何枚分か」で表す）
-    add_feature(kMaterialGain(material_gain));
+    // バイアス項
+    add_feature(kBiasTerm());
 
-    // 駒の損得 [得か、損得なしか、損か][打つ手か否か]
-    add_feature(kSeeSign(see_sign, move.is_drop()));
+    // SEE値（-1＜龍損＞から+1＜龍得＞までの連続値）
+    float normalized_see_score = float(see_score) * kMaterialScale;
+    float see_value = min_max(normalized_see_score, -1.0f, 1.0f);
+    feature_list.continuous_values[kSeeValue] = see_value;
 
-    if (move.is_quiet()) {
-      // History値（0%~100%までを、16分割する）
-      int history_value = 16 * pos_info.history[move] / HistoryStats::kMax;
-      assert(history_value >= 0);
-      add_feature(kHistoryValue(std::min(history_value, 15)));
+    // Global SEE値（-1＜龍損＞から+1＜龍得＞までの連続値）
+    if (!pos.in_check() && move.is_capture_or_promotion()) {
+      int global_see_score = Swap::EvaluateGlobalSwap(move, pos, 3);
+      float normalized_global_see_score = float(global_see_score) * kMaterialScale;
+      float global_see_value = min_max(normalized_global_see_score, -1.0f, 1.0f);
+      feature_list.continuous_values[kGlobalSeeValue] = global_see_value;
+    } else {
+      // Global SEE値により一致率が上がるのは、王手がかかっていない局面の、取る手又は成る手のみ
+      feature_list.continuous_values[kGlobalSeeValue] = 0.0f;
+    }
 
-      // 評価値のgain （50点刻みで、1~800点までを16分割。gainsが負のときは何もしない。）
-      int gain = pos_info.gains[move];
-      if (gain > 0) {
-        add_feature(kEvaluationGain(std::min(gain / 50, 15)));
+    // 手を指した後、相手にタダ取りされる最高の駒
+    Bitboard capture_threats = pos.pieces(kColor) & new_occ & new_opp_controls & ~new_own_controls;
+    PieceType biggest_threat = GetMostValuablePieceType(capture_threats, pos);
+    add_feature(kCaptureThreatAfterMove(biggest_threat));
+
+    // 手を指した後、飛車にタダで成りこまれる
+    for (Bitboard opp_rooks = pos.pieces(~kColor, kRook) & new_occ.andnot(promotion_zone_bb(~kColor));
+         opp_rooks.any(); ) {
+      Square rook_sq = opp_rooks.pop_first_one();
+      Bitboard rook_attacks = rook_attacks_bb(rook_sq, new_occ);
+      Bitboard rook_promotions = rook_attacks & promotion_zone_bb(~kColor);
+      if (rook_promotions.andnot(new_own_controls).any()) {
+        add_feature(kRookPromotionThreatAfterMove());
       }
     }
 
-    // 成る手か否か
-    if (move.is_promotion()) add_feature(kIsPromotion());
+    // 手を指した後、角にタダで成りこまれる
+    for (Bitboard opp_bishops = pos.pieces(~kColor, kBishop) & new_occ.andnot(promotion_zone_bb(~kColor));
+         opp_bishops.any(); ) {
+      Square bishop_sq = opp_bishops.pop_first_one();
+      Bitboard bishop_attacks = bishop_attacks_bb(bishop_sq, new_occ);
+      Bitboard bishop_promotions = bishop_attacks & promotion_zone_bb(~kColor);
+      if (bishop_promotions.andnot(new_own_controls).any()) {
+        add_feature(kBishopPromotionThreatAfterMove());
+      }
+    }
 
-    if (move.is_drop()) {
-      // 打つ手か否か
-      add_feature(kIsDrop());
+    // 手を指した後の、敵玉の自由度
+    int degree_of_freedom = GetDegreeOfFreedom(opp_ksq, new_own_controls);
+    add_feature(kOppKingFreedomAfterMove(min_max(degree_of_freedom, 1, 6)));
 
-      // 持ち駒の枚数 [持ち駒の種類][min(持ち駒の枚数,3)]
-      Hand hand = pos.stm_hand();
-      add_feature(kNumHandPieces(kPawn  , std::min(hand.count(kPawn  ), 3)));
-      add_feature(kNumHandPieces(kLance , std::min(hand.count(kLance ), 3)));
-      add_feature(kNumHandPieces(kKnight, std::min(hand.count(kKnight), 3)));
-      add_feature(kNumHandPieces(kSilver, std::min(hand.count(kSilver), 3)));
-      add_feature(kNumHandPieces(kGold  , std::min(hand.count(kGold  ), 3)));
-      add_feature(kNumHandPieces(kBishop, hand.count(kBishop)));
-      add_feature(kNumHandPieces(kRook  , hand.count(kRook  )));
+    // 静かな手の特徴
+    if (move.is_quiet()) {
+      // 静かな手
+      add_feature(kBiasTermOfQuietMove());
+
+      // history value（-1から+1までの連続値）
+      float history = pos_info.history[move];
+      feature_list.continuous_values[kHistoryValue] = history * kHistoryScale;
+
+      // counter move history value（-1から+1までの連続値）
+      if (pos_info.countermoves_history != nullptr) {
+        float cmh = (*pos_info.countermoves_history)[move];
+        feature_list.continuous_values[kCounterMoveHistoryValue] = cmh * kHistoryScale;
+      } else {
+        feature_list.continuous_values[kCounterMoveHistoryValue] = 0.0f;
+      }
+
+      // follow-up move history value（-1から+1までの連続値）
+      if (pos_info.followupmoves_history != nullptr) {
+        float fmh = (*pos_info.followupmoves_history)[move];
+        feature_list.continuous_values[kFollowupMoveHistoryValue] = fmh * kHistoryScale;
+      } else {
+        feature_list.continuous_values[kFollowupMoveHistoryValue] = 0.0f;
+      }
+
+      // evaluation gain（-1＜龍損＞から+1＜龍得＞までの連続値）
+      float gain = pos_info.gains[move];
+      feature_list.continuous_values[kEvaluationGain] = gain * kMaterialScale;
+    } else {
+      feature_list.continuous_values[kHistoryValue] = 0.0f;
+      feature_list.continuous_values[kCounterMoveHistoryValue] = 0.0f;
+      feature_list.continuous_values[kFollowupMoveHistoryValue] = 0.0f;
+      feature_list.continuous_values[kEvaluationGain] = 0.0f;
     }
   }
 
+
   //
-  // 2-a. 移動先のマスに関する特徴
+  // 王手回避手
   //
-  {
-    const Square to = move.to(); // 移動先
-    const Square dst = to.relative_square(kColor); // 移動先（先手視点にしたもの）
+  if (pos.in_check()) {
+    if (move.is_capture()) {
+      // 取る手の場合に、動かす駒
+      add_feature(kIsCaptureOfChecker(pt));
 
-    // 移動先の段 [段][打つ手か否か]
-    add_feature(kDstRank(dst.rank(), move.is_drop()));
+    } else if (move.piece_type() == kKing) {
+      // 玉が逃げる手の場合に、移動後の玉の自由度（1から6まで）
+      int degree_of_freedom = GetDegreeOfFreedom(move.to(), new_opp_controls);
+      add_feature(kKingFreedomAfterEvasion(min_max(degree_of_freedom, 1, 6)));
 
-    // 移動先のマス
-    add_feature(kDstSquare(dst));
+    } else if (!IsSacrificeMove(move, pos)) {
+      // 合駒の場合に、合駒する駒の種類
+      add_feature(kIsInterception(pt));
 
-    // 移動先の周囲15マス（縦5マスx横3マス）の駒の配置パターン
-    FifteenNeighborhoods pieces = ext_board.GetFifteenNeighborhoodPieces(to);
-    FifteenNeighborhoods own_controls = ext_board.GetFifteenNeighborhoodControls(kColor, to).LimitTo(1);
-    FifteenNeighborhoods opp_controls = ext_board.GetFifteenNeighborhoodControls(~kColor, to).LimitTo(1);
-    if (kColor == kWhite) {
-      pieces       = pieces.Rotate180().FlipPieceColors();
-      own_controls = own_controls.Rotate180();
-      opp_controls = opp_controls.Rotate180();
-    }
-    for (size_t i = 0; i < 15; ++i) {
-      Piece p(pieces.at(i));
-      add_feature(kDstPattern(i, p, own_controls.at(i), opp_controls.at(i)));
-    }
+      // 合駒の場合に、合駒と玉との距離（1から3まで）
+      int distance = Square::distance(move.to(), own_ksq);
+      add_feature(kDistanceBetweenKingAndInterceptor(min_max(distance, 1, 3)));
 
-    // 移動先と、直前の相手の手との関係
-    if (previous_move1.is_real_move()) {
-      PieceType pt1 = previous_move1.piece_type_after_move();
-      Square dst1 = previous_move1.to().relative_square(kColor);
-      int relation1 = Square::relation(dst, dst1);
-      add_feature(kDstRelationToPreviousMove1(pt1, relation1));
+    } else {
+      // 中合いの場合に、合駒する駒の種類
+      add_feature(kIsChuai(pt));
+
+      // 中合いの場合に、合駒と玉との距離（2から4まで）
+      int distance = Square::distance(move.to(), own_ksq);
+      add_feature(kDistanceBetweenKingAndChuaiPiece(min_max(distance, 2, 4)));
     }
 
-    // 移動先と、２手前の自分の手との関係
-    if (previous_move2.is_real_move()) {
-      PieceType pt2 = previous_move2.piece_type_after_move();
-      Square dst2 = previous_move2.to().relative_square(kColor);
-      int relation2 = Square::relation(dst, dst2);
-      add_feature(kDstRelationToPreviousMove2(pt2, relation2));
-    }
-
-    // 移動先の、敵・味方の利き数の組み合わせ
-    int num_own_controls = std::min(ext_board.num_controls(kColor, to), kMaxControls);
-    int num_opp_controls = std::min(ext_board.num_controls(~kColor, to), kMaxControls);
-    add_feature(kDstControls(move.is_drop(), num_own_controls, num_opp_controls));
-
-    // 移動先の、敵・味方の長い利きの数
-    int own_long_controls = std::min(ext_board.long_controls(kColor, to).count(), kMaxControls);
-    int opp_long_controls = std::min(ext_board.long_controls(~kColor, to).count(), kMaxControls);
-    add_feature(kDstLongControls(kBlack, own_long_controls));
-    add_feature(kDstLongControls(kWhite, opp_long_controls));
-
-    // 移動先と味方の飛車との相対位置
-    for (Bitboard own_rooks = pos.pieces(kColor, kRook, kDragon); own_rooks.any(); ) {
-      Square rook_sq = own_rooks.pop_first_one().relative_square(kColor);
-      add_feature(kDstRelationToRook(kBlack, Square::relation(dst, rook_sq)));
-    }
-
-    // 移動先と相手の飛車との相対位置
-    for (Bitboard opp_rooks = pos.pieces(~kColor, kRook, kDragon); opp_rooks.any(); ) {
-      Square rook_sq = opp_rooks.pop_first_one().relative_square(kColor);
-      add_feature(kDstRelationToRook(kWhite, Square::relation(dst, rook_sq)));
-    }
-
-    // 移動先と玉との相対位置
-    int relation_to_own_king = Square::relation(dst, own_ksq.relative_square(kColor));
-    int relation_to_opp_king = Square::relation(dst, opp_ksq.relative_square(kColor));
-    add_feature(kDstRelationToKing(kBlack, relation_to_own_king));
-    add_feature(kDstRelationToKing(kWhite, relation_to_opp_king));
-
-    // 移動先と、敵・味方近い方の玉との距離
-    int distance = std::min(Square::distance(to, own_ksq), Square::distance(to, opp_ksq));
-    add_feature(kDstDistanceToKing(distance));
-
-#if 0
-    // TODO 除去（一致率マイナス）
-    // 敵玉のいる筋と、移動先の筋の組み合わせ
-    File dst_file = dst.file();
-    File opp_king_file = opp_ksq.relative_square(kColor).file();
-    add_feature(kDstFileAndOppKingFile(dst_file, opp_king_file));
-#endif
+    return feature_list;
   }
 
-  //
-  // 2-b. 移動元のマスに関する特徴
-  //
-  if (!move.is_drop()) {
-    const Square from = move.from(); // 移動元
-    const Square src = from.relative_square(kColor); // 移動元（先手視点にしたもの）
-
-    // 移動元の段
-    add_feature(kSrcRank(src.rank()));
-
-    // 移動元のマス
-    add_feature(kSrcSquare(src));
-
-    // 移動元の周囲15マス（縦5マスx横3マス）の駒の配置パターン
-    FifteenNeighborhoods pieces = ext_board.GetFifteenNeighborhoodPieces(from);
-    FifteenNeighborhoods own_controls = ext_board.GetFifteenNeighborhoodControls(kColor, from).LimitTo(1);
-    FifteenNeighborhoods opp_controls = ext_board.GetFifteenNeighborhoodControls(~kColor, from).LimitTo(1);
-    if (kColor == kWhite) {
-      pieces       = pieces.Rotate180().FlipPieceColors();
-      own_controls = own_controls.Rotate180();
-      opp_controls = opp_controls.Rotate180();
-    }
-    for (size_t i = 0; i < 15; ++i) {
-      Piece p(pieces.at(i));
-      add_feature(kSrcPattern(i, p, own_controls.at(i), opp_controls.at(i)));
-    }
-
-    // 移動元と、直前の相手の手との関係
-    if (previous_move1.is_real_move()) {
-      PieceType pt1 = previous_move1.piece_type_after_move();
-      Square src1 = previous_move1.to().relative_square(kColor);
-      int relation1 = Square::relation(src, src1);
-      add_feature(kSrcRelationToPreviousMove1(pt1, relation1));
-    }
-
-    // 移動元と、２手前の自分の手との関係
-    if (previous_move2.is_real_move()) {
-      PieceType pt2 = previous_move2.piece_type_after_move();
-      Square src2 = previous_move2.to().relative_square(kColor);
-      int relation2 = Square::relation(src, src2);
-      add_feature(kSrcRelationToPreviousMove2(pt2, relation2));
-    }
-
-    // 移動元の、敵・味方の利き数の組み合わせ
-    int num_own_controls = std::min(ext_board.num_controls(kColor, from), kMaxControls);
-    int num_opp_controls = std::min(ext_board.num_controls(~kColor, from), kMaxControls);
-    add_feature(kSrcControls(num_own_controls, num_opp_controls));
-
-    // 移動元の、敵・味方の長い利きの数
-    int own_long_controls = std::min(ext_board.long_controls(kColor, from).count(), kMaxControls);
-    int opp_long_controls = std::min(ext_board.long_controls(~kColor, from).count(), kMaxControls);
-    add_feature(kSrcLongControls(kBlack, own_long_controls));
-    add_feature(kSrcLongControls(kWhite, opp_long_controls));
-
-    // 移動元と味方の飛車との相対位置
-    for (Bitboard own_rooks = pos.pieces(kColor, kRook, kDragon); own_rooks.any(); ) {
-      Square rook_sq = own_rooks.pop_first_one().relative_square(kColor);
-      add_feature(kSrcRelationToRook(kBlack, Square::relation(src, rook_sq)));
-    }
-
-    // 移動元と相手の飛車との相対位置
-    for (Bitboard opp_rooks = pos.pieces(~kColor, kRook, kDragon); opp_rooks.any(); ) {
-      Square rook_sq = opp_rooks.pop_first_one().relative_square(kColor);
-      add_feature(kSrcRelationToRook(kWhite, Square::relation(src, rook_sq)));
-    }
-
-    // 移動元と玉との相対位置
-    int relation_to_own_king = Square::relation(src, own_ksq.relative_square(kColor));
-    int relation_to_opp_king = Square::relation(src, opp_ksq.relative_square(kColor));
-    add_feature(kSrcRelationToKing(kBlack, relation_to_own_king));
-    add_feature(kSrcRelationToKing(kWhite, relation_to_opp_king));
-
-    // 移動元と、敵・味方近い方の玉との距離
-    int distance = std::min(Square::distance(from, own_ksq), Square::distance(from, opp_ksq));
-    add_feature(kSrcDistanceToKing(distance));
-
-#if 0
-    // TODO 除去（一致率マイナス）
-    // 敵玉のいる筋と、移動元の筋の組み合わせ
-    File src_file = src.file();
-    File opp_king_file = opp_ksq.relative_square(kColor).file();
-    add_feature(kSrcFileAndOppKingFile(src_file, opp_king_file));
-#endif
-
-    // 玉とのマンハッタン距離の増減
-    int src_distance_own = Square::distance(from     , own_ksq);
-    int dst_distance_own = Square::distance(move.to(), own_ksq);
-    int src_distance_opp = Square::distance(from     , opp_ksq);
-    int dst_distance_opp = Square::distance(move.to(), opp_ksq);
-    int delta_own = math::sign(dst_distance_own - src_distance_own);
-    int delta_opp = math::sign(dst_distance_opp - src_distance_opp);
-    add_feature(kDistanceToKingDelta(kBlack, delta_own));
-    add_feature(kDistanceToKingDelta(kWhite, delta_opp));
-  }
 
   //
-  // 3. 取る手に関する特徴
+  // 取る手の特徴
   //
   if (move.is_capture()) {
-    // 取る手の損得
-    add_feature(kCaptureGain(material_gain));
-
-    // 取った駒の種類
-    add_feature(kCapturedPieceType(see_sign, move.captured_piece_type()));
-
-    // 取れる最高の駒を取る手（SEEの符号で場合分け）
-    if (pos_info.most_valuable_victim.test(move.to())) {
-      add_feature(kIsCaptureOfMostValuablePiece(see_sign));
+    // 取れる最高の駒を取る手（SEE>=0）
+    if (   pos_info.most_valuable_victim.test(to_bb)
+        && see_sign >= 0) {
+      add_feature(kIsCaptureOfMostValuablePiece());
     }
 
-    // 直前に動いた駒の取り返し（SEEの符号で場合分け）
-    if (previous_move1.is_real_move() && move.to() == previous_move1.to()) {
-      add_feature(kIsRecapture(see_sign));
+    // 直前に動いた駒の取り返し（SEE>=0）
+    if (   previous_move1.is_real_move()
+        && move.to() == previous_move1.to()
+        && see_sign >= 0) {
+      add_feature(kIsRecapture());
     }
 
-#if 0
-    // TODO 除去（ほんのわずかに一致率が悪化）
-    // 2手前に動いた駒で駒を取る手（SEEの符号で場合分け）
-    if (previous_move2.is_real_move() && move.to() == previous_move2.to()) {
-      add_feature(kIsCaptureByLastMovedPiece(see_sign));
+    // 2手前に動いた駒で駒を取る手（SEE>=0）
+    if (   previous_move2.is_real_move()
+        && move.from() == previous_move2.to()
+        && see_sign >= 0) {
+      add_feature(kIsCaptureWithLastMovedPiece());
     }
-#endif
+
+    if (see_sign > 0) {
+      // 駒得の取る手 [歩何枚分の得か]
+      int gain = int(see_score) / Material::exchange_value(kPawn);
+      add_feature(kGoodCapture(min_max(gain, 0, 7)));
+    } else if (see_sign == 0) {
+      // 駒交換 [交換する駒]
+      add_feature(kEqualCapture(pt));
+    } else {
+      // 駒損の取る手 [歩何枚分の損か]
+      int loss = int(-see_score) / Material::exchange_value(kPawn);
+      add_feature(kBadCapture(min_max(loss, 0, 7)));
+    }
+
+    // [取った駒]
+    PieceType captured = move.captured_piece_type();
+    add_feature(kCapturedPiece(captured));
+
+    // [動かした駒]
+    add_feature(kMovedPieceToCapture(pt));
+
+    // [動かした駒][取った駒]
+    add_feature(kMovedPieceAndCapturedPiece(pt, captured));
+
+    // [取った駒][段]
+    add_feature(kCapturedPieceAndRank(captured, dst.rank()));
+
+    // [取った駒][自玉との距離]
+    int distance_to_own_king = Square::distance(move.to(), own_ksq);
+    add_feature(kCapturedPieceAndDistanceToOwnKing(captured, distance_to_own_king));
+
+    // [取った駒][敵玉との距離]（歩・香・桂を取る手について）
+    int distance_to_opp_king = Square::distance(move.to(), opp_ksq);
+    add_feature(kCapturedPieceAndDistanceToOppKing(captured, distance_to_opp_king));
+
+    // [取った駒][取った駒を持ち駒に持っているか]
+    PieceType hand_type = GetOriginalType(captured);
+    int num_hands = pos.hand(kColor).has(hand_type);
+    add_feature(kNumHandPiecesBeforeCapture(hand_type, num_hands));
   }
 
   //
-  // 4. 王手に関する特徴
+  // 成る手
   //
-  if (pos.MoveGivesCheck(move)) {
-    const int num_opp_controls = ext_board.num_controls(~kColor, move.to());
+  if (move.is_promotion()) {
+    // 成る手 [動かした駒]
+    add_feature(kIsPromotion(pt));
 
-    // 王手か否か
-    add_feature(kGivesCheck());
+    // [動かした駒][敵玉との距離]
+    int distance_to_opp_king = Square::distance(move.to(), opp_ksq);
+    add_feature(kDistanceToOppKingAfterPromotion(pt, distance_to_opp_king));
 
-    // 有効王手（相手から取り返されない位置にする王手）か否か
-    if (neighborhood8_bb(opp_ksq).test(move.to())) {
-      // 8近傍の場合：玉の利き以外に相手の利きがないこと
-      if (num_opp_controls == 1) {
-        add_feature(kEffectiveCheck());
-      }
+    // [動かした駒][移動元の段]
+    if (see_sign >= 0) {
+      Rank r = relative_rank(kColor, move.from().rank());
+      add_feature(kRankBeforePromotion(pt, r));
+    }
+
+    // [動かした駒][移動先の段]
+    if (see_sign >= 0) {
+      Rank r = relative_rank(kColor, move.to().rank());
+      add_feature(kRankAfterPromotion(pt, r));
+    }
+
+    // 駒損の成る手 [歩何枚分の損か]
+    if (see_sign < 0) {
+      int loss = int(-see_score) / Material::exchange_value(kPawn);
+      add_feature(kMaterialLossAfterPromotion(std::min(loss, 7)));
+    }
+  }
+
+  //
+  // 王手
+  //
+  if (move_gives_check) {
+    // 王手後の、敵玉の自由度
+    int degree_of_freedom = GetDegreeOfFreedom(opp_ksq, new_own_controls);
+
+    // a. 開き王手（SEE値で場合分けしない）
+    if (IsDiscoveredCheck(move, pos)) {
+      add_feature(kIsDiscoveredCheck(pt));
+
+    // b. SEE>=0の王手
+    } else if (see_sign >= 0) {
+      add_feature(kIsGoodCheck(pt));
+      add_feature(kOppKingFreedomAfterGoodCheck(min_max(degree_of_freedom, 1, 6)));
+
+    // c. SEE<0の王手 [王手した駒]
+    } else if (!IsSacrificeMove(move, pos)) {
+      add_feature(kIsBadCheck(pt));
+      add_feature(kOppKingFreedomAfterBadCheck(min_max(degree_of_freedom, 1, 6)));
+
+      // d. タダ取りされる王手 [王手した駒]
     } else {
-      // 8近傍以外の場合：相手の利きが全くないこと
-      if (num_opp_controls == 0) {
-        add_feature(kEffectiveCheck());
-      }
+      add_feature(kIsSacrificeCheck(pt));
+      add_feature(kOppKingFreedomAfterSacrificeCheck(min_max(degree_of_freedom, 1, 6)));
     }
 
-    // 開き王手か否か
+    // 駒損の王手 [歩何枚分の損か]
+    if (see_sign < 0) {
+      int loss = int(-see_score) / Material::exchange_value(kPawn);
+      add_feature(kMaterialLossAfterCheck(std::min(loss, 7)));
+    }
+  }
+
+  //
+  // 攻める手
+  //
+  {
+    // 長い利きを付けた駒の種類 [動かした駒][利きを付けた駒][味方の利きの有無][敵の利きの有無]
+    if (move.piece_after_move().is_slider()) {
+      Bitboard long_attacks = (new_attacks & new_occ).andnot(neighborhood8_bb(move.to()));
+      long_attacks.ForEach([&](Square sq) -> void {
+        Piece piece = new_eb.piece_on(sq);
+        if (kColor == kWhite) piece = piece.opponent_piece(); // 先手視点にする
+        int own_control = std::min(new_eb.num_controls(kColor, sq) - 1, 1); // 自分自身の利きを除く
+        int opp_control = std::min(new_eb.num_controls(~kColor, sq), 1);
+        add_feature(kDstLongAttack(pt, piece, own_control, opp_control));
+      });
+    }
+
+    // 長い利きを付けた駒の種類 [動かした駒][利きを付けた駒][味方の利きの有無][敵の利きの有無]
     if (   !move.is_drop()
-        && pos.discovered_check_candidates().test(move.from())
-        && !line_bb(move.from(), opp_ksq).test(move.to())) {
-      add_feature(kDiscoveredCheck());
+        && move.piece().is_slider()) {
+      Bitboard long_attacks = (old_attacks & old_occ).andnot(neighborhood8_bb(move.from()));
+      long_attacks.ForEach([&](Square sq) -> void {
+        Piece piece = old_eb.piece_on(sq);
+        if (kColor == kWhite) piece = piece.opponent_piece(); // 先手視点にする
+        int own_control = std::min(old_eb.num_controls(kColor, sq) - 1, 1); // 自分自身の利きを除く
+        int opp_control = std::min(old_eb.num_controls(~kColor, sq), 1);
+        add_feature(kSrcLongAttack(pt, piece, own_control, opp_control));
+      });
     }
 
-#if 0
-    // TODO 除去（一致率マイナス）
-    // ただ捨ての王手か否か
-    const int num_own_controls = ext_board.num_controls(kColor, move.to());
-    if (move.is_drop() && num_opp_controls != 0 && num_own_controls == 0) {
-      add_feature(kSacrificeCheck());
-    }
-#endif
-
-    // 送りの手筋の王手（玉が取り返すと、相手の駒を取れるかどうか）[取れる相手の駒の種類]
-    if (   pos_info.opponent_king_neighborhoods8.test(move.to())
-        && pos.num_controls(kColor, move.to()) == 0
-        && pos_info.opponent_king_neighborhoods8.test(pos.pieces(~kColor))) {
-      assert(move.is_drop());
-      // 玉しか利きがついていない駒を目標に定める
-      EightNeighborhoods own_controls = ext_board.GetEightNeighborhoodControls(kColor, opp_ksq);
-      EightNeighborhoods opp_controls = ext_board.GetEightNeighborhoodControls(~kColor, opp_ksq);
-      Bitboard own_attacks = direction_bb(opp_ksq, own_controls.more_than(0));
-      Bitboard opp_defenses = direction_bb(opp_ksq, opp_controls.more_than(1));
-      Bitboard target = (pos.pieces(~kColor) & own_attacks).andnot(opp_defenses);
-      // 玉しか利きがない駒があれば、玉の利きが外れるか否かを調べる
-      if (target.any()) {
-        Bitboard old_king_attacks = pos_info.opponent_king_neighborhoods8;
-        Bitboard new_king_attacks = neighborhood8_bb(move.to());
-        Bitboard no_king_attack = old_king_attacks.andnot(new_king_attacks);
-        (target & no_king_attack).ForEach([&](Square sq) {
-          add_feature(kSendOffCheck(pos.piece_on(sq).type()));
+    // 空き当たり [利きを付けた駒][味方の利きの有無][敵の利きの有無]
+    if (!move.is_drop()) {
+      DirectionSet long_controls = old_eb.long_controls(kColor, move.from());
+      if (long_controls.any()) {
+        Bitboard discovered_attacks = queen_attacks_bb(move.from(), new_occ)
+                                    & direction_bb(move.from(), long_controls)
+                                    & ~line_bb(move.from(), move.to());
+        Bitboard attacked_pieces = new_occ & discovered_attacks;
+        attacked_pieces.ForEach([&](Square sq) -> void {
+          Piece piece = new_eb.piece_on(sq);
+          if (kColor == kWhite) piece = piece.opponent_piece(); // 先手視点にする
+          int own_control = std::min(new_eb.num_controls(kColor, sq) - 1, 1); // 自分自身の利きを除く
+          int opp_control = std::min(new_eb.num_controls(~kColor, sq), 1);
+          add_feature(kDiscoveredAttack(pt, piece, own_control, opp_control));
         });
       }
     }
-  }
 
-  //
-  // 5. 王手回避手に関する特徴
-  //
-  if (pos.in_check()) {
-    const Square checker_sq = pos.checkers().first_one();
-
-    // 王手を回避する手か否か
-    add_feature(kIsEvasion());
-
-    // 王手している駒を取る手（駒の種類で場合分け）
-    if (move.to() == checker_sq) {
-      PieceType checker_type = pos.piece_on(checker_sq).type();
-      add_feature(kCaptureChecker(checker_type));
-    }
-
-    if (piece_type == kKing) {
-      // 玉が逃げる手の場合に、玉が逃げる方向
-      Square dst = move.to().relative_square(kColor);
-      Square src = move.from().relative_square(kColor);
-      int delta_y = dst.rank() - src.rank();
-      add_feature(kEvasionDirection(delta_y));
-    } else if (!move.is_capture()) {
-      // 合駒の場合に、合駒と玉との距離（1から8まで）
-      int distance = Square::distance(own_ksq, move.to());
-      add_feature(kInterceptionDistance(distance));
-
-#if 0
-      // TODO 除去？（一致率マイナス）
-      // 合駒の場合に、王手している相手の駒の種類
-      PieceType checker_type = pos.piece_on(checker_sq).type();
-      add_feature(kCheckerType(checker_type));
-#endif
-    }
-  }
-
-  //
-  // 6. 攻める手に関する特徴
-  //
-  {
-    // 利きを付けた駒の種類 [利きを付けた駒][味方の利きの有無][敵の利きの有無]
-    (attacks & pos.pieces()).ForEach([&](Square sq) {
-      Piece piece = pos.piece_on(sq);
-      if (kColor == kWhite) piece = piece.opponent_piece(); // 先手視点にする
-      bool own_control = ext_board.num_controls(kColor, sq) != 0;
-      bool opp_control = ext_board.num_controls(~kColor, sq) != 0;
-      add_feature(kAttackToPiece(piece, own_control, opp_control));
-    });
-
-    // 利きを付けた相手の駒を調べる
-    PieceType best_pt = kNoPieceType, second_best_pt = kNoPieceType;
-    Score best_value = kScoreZero, second_best_value = kScoreZero;
-    bool best_pt_is_supported = false, second_pt_is_supported = false;
-    (attacks & pos.pieces(~kColor)).ForEach([&](Square sq) {
-      PieceType attacked_pt = pos.piece_on(sq).type();
-      Score attacked_piece_value = Material::exchange_value(attacked_pt);
-      bool is_supported = ext_board.num_controls(~kColor, sq) > 0;
-
-      // 最も価値の高い駒/２番めに価値の高い駒を更新する
-      // 注：最も価値の高い駒の種類と、２番めに価値が高い駒の種類が同じ場合もあるので、「等号付き」で比較
-      if (attacked_piece_value >= best_value) {
-        second_best_pt = best_pt;
-        second_best_value = best_value;
-        second_pt_is_supported = best_pt_is_supported;
-        best_pt = attacked_pt;
-        best_value = attacked_piece_value;
-        best_pt_is_supported = is_supported;
-      } else if (attacked_piece_value > best_value) {
-        second_best_pt = attacked_pt;
-        second_best_value = attacked_piece_value;
-        second_pt_is_supported = is_supported;
-      }
-
-#if 0
-      // TODO 除去（一致率がマイナス）
-      // そっぽ手判定 [相手玉との距離][利きを付けた駒の種類]
-      int distance = Square::distance(opp_ksq, sq);
-      add_feature(kDistanceBetweenKingAndVictim(distance, attacked_pt));
-#endif
-    });
-
-    // 当たりを付けた駒のうち、最も価値が高い/２番めに価値が高い相手の駒（両取りを意識）
-    add_feature(kMostValuableAttack1(best_pt, best_pt_is_supported));
-    add_feature(kMostValuableAttack2(second_best_pt, second_pt_is_supported));
-
-    // ピンしている駒に対する当たり [利きを付けた駒の種類]
-    if (attacks.test(pos_info.opponent_pinned_pieces)) {
-      Bitboard target = attacks & pos_info.opponent_pinned_pieces;
-      PieceType victim = pos.piece_on(target.first_one()).type();
-      add_feature(kAttackToPinnedPiece(victim));
-    }
-
-    // 空き当たり [駒の種類][相手の利きの有無]
-    if (!move.is_drop()) {
-      for (Direction attack_dir : ext_board.long_controls(kColor, move.from())) {
-        Square delta = Square::direction_to_delta(attack_dir);
-        for (Square s = move.from() + delta;
-            s != move.to() && s.IsOk() && Square::distance(s, s - delta) <= 1;
-            s += delta) {
-          Piece attacked_piece = pos.piece_on(s);
-          if (attacked_piece != kNoPiece) {
-            if (attacked_piece.color() == ~kColor) {
-              bool target_is_supported = ext_board.num_controls(~kColor, s) > 0;
-              add_feature(kDiscoveredAttack(attacked_piece.type(), target_is_supported));
-            }
-            break;
-          }
+    // ピンしている駒に対する当たり [動かした駒][利きを付けた駒]
+    if (see_sign < 0) {
+      for (Bitboard targets = new_attacks & pos_info.opponent_pinned_pieces;
+           targets.any(); ) {
+        Square target_sq = targets.pop_first_one();
+        if (!line_bb(target_sq, opp_ksq).test(move.to())) {
+          PieceType target_pt = pos.piece_on(target_sq).type();
+          add_feature(kAttackToPinnedPieces(pt, target_pt));
         }
       }
     }
 
-    // 大駒を敵陣に打ち込む手 [min(安全に成れるマスの数, 7)]
-    if (   move.is_drop()
-        && (piece_type == kRook || piece_type == kBishop)
-        && move.to().is_promotion_zone_of(kColor)) {
-      Bitboard next_moves = attacks.andnot(pos.pieces(kColor)); // 次に移動できるマス
-      Bitboard safe_moves = next_moves.andnot(pos_info.attacked_squares);
-      int num_safe_moves = std::min(safe_moves.count(), 7);
-      add_feature(kDropToOpponentArea(num_safe_moves));
-    }
-
-#if 0
-    // FIXME 除去（-0.007%）
-    // 駒を成る手 [相手玉との距離]
-    if (move.is_promotion()) {
-      int distance_to_king = Square::distance(opp_ksq, move.to());
-      add_feature(kDistanceToKingWhenPromotion(distance_to_king));
-    }
-#endif
-
-    // 相手の歩のない筋で、味方飛香の利きにある歩を５段目より前に動かす手
-    if (   !move.is_drop()
-        && piece_type == kPawn
-        && relative_rank(kColor, move.to().rank()) < kRank5
-        && !pos.pieces(~kColor, kPawn).test(file_bb(move.to().file()))) {
-      DirectionSet long_controls = ext_board.long_controls(kColor, move.from());
-      if (long_controls.test(kColor == kBlack ? kDirN : kDirS)) {
-        add_feature(kAdvancingPawn());
-      }
-    }
-  }
-
-  //
-  // 7. 受ける手に関する特徴
-  //
-  {
-    if (!move.is_drop()) {
-      // 取られそうな最高の駒を逃げる手
-      if (pos_info.most_valuable_threatened_piece.test(move.from())) {
-        add_feature(kDefendMostValuablePiece());
-      }
-
-      // 直前の相手の手で当たりにされた最高の駒が逃げる手（相手が動かした駒の種類で場合分け）
-      if (pos_info.pieces_attacked_by_last_move.test(move.from())) {
-        PieceType attacker_type = previous_move1.piece_type();
-        add_feature(kDefendPiecesAttackedByLastMove(attacker_type));
-      }
-    }
-
-#if 0
-    // TODO 除去（一致率マイナス）
-    // 取られそうな最高の駒に、利きを足して守る手（取られそうな駒の種類、味方の利きの有無で場合分け）
-    if (attacks.test(pos_info.most_valuable_threatened_piece)) {
-      Bitboard target = supported_squares & pos_info.most_valuable_threatened_piece;
-      Square threatned_sq = target.first_one();
-      PieceType threatened_pt = pos.piece_on(threatned_sq).type();
-      bool already_supported = ext_board.num_controls(kColor, threatned_sq) != 0;
-      add_feature(kSupportPiecesAttackedByLastMove(threatened_pt, already_supported));
-    }
-#endif
-
-    // 直前の相手の手で取られそうな最高の駒に、合駒をして守る手（相手が動かした駒の種類で場合分け）
-    if (pos_info.intercept_attacks_by_last_move.test(move.to())) {
-      PieceType attacker_type = previous_move1.piece_type();
-      add_feature(kInterceptAttacks(attacker_type));
-    }
-
-    // 直前の相手の手で取られそうな最高の駒に、利きを足して守る手（相手が動かした駒の種類、味方の利きの有無で場合分け）
-    if (attacks.test(pos_info.pieces_attacked_by_last_move)) {
-      Bitboard target = attacks & pos_info.pieces_attacked_by_last_move;
-      Square attacked_sq = target.first_one();
-      PieceType attacker_type = previous_move1.piece_type();
-      bool already_supported = ext_board.num_controls(kColor, attacked_sq) != 0;
-      add_feature(kSupportPiecesAttackedByLastMove(attacker_type, already_supported));
-    }
-  }
-
-  //
-  // 8. 自玉周り
-  //
-  {
-#if 0
-    // TODO 除去 一致率ほぼ変化なし
-    // 自玉の８近傍に利きをつけている相手の飛角に合駒をする手 [打つ手かどうか]
-    if (pos_info.intercept_attacks_to_our_castle.test(move.to())) {
-      if (move.is_drop()) {
-        add_feature(kInterceptAttacksToOurCastle(true));
-      } else if (!neighborhood8_bb(own_ksq).test(move.from())) {
-        add_feature(kInterceptAttacksToOurCastle(false));
-      }
-    }
-#endif
-
-    // 自玉の８近傍に利きを足す手（味方の利きよりも、相手の利きのほうが多い場合）[打つ手かどうか]
-    if (attacks.test(pos_info.dangerous_king_neighborhood_squares)) {
-      if (move.is_drop()) {
-        add_feature(kReinforceOurCastle(true));
-      } else {
-        // 打つ手ではない場合には、利きを新たに追加する場合のみを選ぶ
-        Bitboard old_attacks = AttacksFrom(move.piece(), move.from(), pos.pieces());
-        if (!old_attacks.test(pos_info.dangerous_king_neighborhood_squares)) {
-          add_feature(kReinforceOurCastle(false));
+    // 両取りの手 [指した駒][当たりを付けた駒のうち、２番目に価値が高い相手の駒]
+    if (see_sign >= 0) {
+      PieceType best_piece_type = kNoPieceType, second_piece_type = kNoPieceType;
+      Score best_piece_value = kScoreZero, second_piece_value = kScoreZero;
+      Bitboard targets = new_attacks.andnot(old_attacks) & pos.pieces(~kColor);
+      targets.ForEach([&](Square sq) {
+        PieceType piece_type = pos.piece_on(sq).type();
+        Score piece_value = Material::exchange_value(piece_type);
+        if (piece_value > best_piece_value) {
+          // 最も価値の高い駒/２番めに価値の高い駒を更新する
+          second_piece_type   = best_piece_type;
+          second_piece_value  = best_piece_value;
+          best_piece_type   = piece_type;
+          best_piece_value  = piece_value;
+        } else if (piece_value > second_piece_value) {
+          // ２番目に価値の高い駒を更新
+          second_piece_type   = piece_type;
+          second_piece_value  = piece_value;
         }
-      }
+      });
+      add_feature(kDoubleAttack(pt, second_piece_type));
     }
 
-    // 相手が持ち駒で自玉に有効王手をかけることができるマスに、先に駒を打って埋める手
-    if (   pos_info.opponent_effective_drop_checks.test(move.to())
+    // 同〜と取り返してきたら取れる最高の駒 [犠牲にする駒][取れる最高の相手駒]
+    if (IsSacrificeMove(move, pos)) {
+      Bitboard old_victims = old_opp_pieces & old_own_controls.andnot(old_opp_controls);
+
+      // 相手の取り返しの手を求める
+      Bitboard opp_attackers = pos.AttackersTo<~kColor>(move.to(), new_occ);
+      PieceType opp_attacker = GetLeastValuablePieceType(opp_attackers, new_eb);
+      Square attacker_sq = (pos.pieces(~kColor, opp_attacker) & new_occ).first_one();
+      Move recapture(Piece(~kColor, opp_attacker),
+                     attacker_sq, move.to(), false, move.piece_after_move());
+
+      // 取り返した後の駒の配置及び利きを求める
+      ExtendedBoard next_eb = new_eb;
+      next_eb.MakeCaptureMove(recapture);
+      Bitboard next_opp_pieces = new_opp_pieces.andnot(square_bb(attacker_sq));
+      Bitboard next_own_controls = next_eb.GetControlledSquares(kColor);
+      Bitboard next_opp_controls = next_eb.GetControlledSquares(~kColor);
+
+      // 次の局面でタダ取りできる相手の駒を求める
+      Bitboard next_victims = next_opp_pieces & next_own_controls.andnot(next_opp_controls);
+
+      // 新たにタダ取りできるようになった相手の駒のうち、最高の駒を求める
+      PieceType victim_pt = GetMostValuablePieceType(next_victims.andnot(old_victims), next_eb);
+
+      add_feature(kCaptureAfterSacrifice(pt, victim_pt));
+    }
+  }
+
+  //
+  // 受ける手
+  //
+  {
+    Score threat_score = EvaluateThreat(move, pos);
+
+    // 取られそうな最高の駒を逃げる手（SSE>=0）
+    if (   pos_info.most_valuable_threatened_piece.test(from_bb)
+        && see_sign >= 0
+        && (pt != kPawn && pt != kLance)) {
+      add_feature(kEscapeMoveOfMostValuablePiece());
+    }
+
+    // 取られそうな駒を逃げる手（SEE>=0）[動かした駒]
+    if (   threat_score > 0
+        && see_sign >= 0) {
+      add_feature(kEscapeMove(pt));
+    }
+
+    // 駒が取られそうな場合に、合駒をして守る手 [動かした駒][守った駒]
+    if (   see_sign == 0
         && move.is_drop()
-        && pos_info.opponent_effective_drop_checks.count() == 1) { // 唯一の有効王手の場合
-      add_feature(kObstructOpponentEffectiveChecks());
+        && pos_info.most_valuable_threatened_piece.any()) {
+      Square victim_sq = pos_info.most_valuable_threatened_piece.first_one();
+      if (IsInterceptionDefense(move, victim_sq, pos)) {
+        PieceType victim_pt = pos.piece_on(victim_sq).type();
+        add_feature(kInterceptionDefense(pt, victim_pt));
+      }
     }
   }
 
   //
-  // 9. 相手玉周り
+  // 自玉周り
+  //
+  if (move.is_drop()) {
+    // 自玉の８近傍への飛び利きを遮る手（打つ手のみ） [駒の種類]
+    if (   BlocksLongAttacksToOwnCastle(move, pos)
+        && see_sign >= 0) {
+      add_feature(kBlockOfLongAttacksToOwnCastle(pt));
+    }
+
+    // 自玉の８近傍に利きを足す手（打つ手のみ）（味方の利きより相手の利きが多いマスに利きを足す）[駒の種類]
+    if (   new_attacks.test(pos_info.dangerous_king_neighborhood_squares)
+        && see_sign >= 0) {
+      add_feature(kReinforcementOfOurCastle(pt));
+    }
+  }
+
+  //
+  // 敵玉周り
   //
   {
-    // 相手玉周りに利きをつける手（8近傍、24近傍）
-    if (attacks.test(pos_info.opponent_king_neighborhoods8)) {
-      add_feature(kAttackToKingNeighborhood8());
-    }
-    if (attacks.test(pos_info.opponent_king_neighborhoods24)) {
-      add_feature(kAttackToKingNeighborhood24());
-    }
-
-    // 相手玉の24近傍にある、相手の金・銀に当たりをかける手
-    if (attacks.test(pos_info.opponent_king_neighborhood_golds)) {
-      add_feature(kAttackToGoldNearKing());
-    }
-    if (attacks.test(pos_info.opponent_king_neighborhood_silvers)) {
-      add_feature(kAttackToSilverNearKing());
+    // 敵玉８近傍に利きを足す手（飛び駒のみ）
+    if (   move.piece().is_slider()
+        && new_attacks.test(pos_info.opponent_king_neighborhoods8)
+        && see_sign >= 0) {
+      add_feature(kAttackToOppKingNeighbor8());
     }
   }
 
   //
-  // 駒ごとの手筋
+  // 利き関係（ExtendedBoardを使った盤全体の評価）
   //
-  switch (piece_type) {
+  if (see_sign == 0) {
+    // 新たに利きを付けた相手の駒
+    Bitboard added_controls = new_own_controls.andnot(old_own_controls);
+    Bitboard added_attacks = pos.pieces(~kColor).andnot(to_bb) & added_controls;
+    add_feature(kNewAttackToOppPiece(GetMostValuablePieceType(added_attacks, new_eb)));
+
+    // 手を指した後、相手がパスした場合、タダ取りできる最高の駒
+    Bitboard expected_good_capture = pos.pieces(~kColor).andnot(to_bb)
+                                   & new_own_controls.andnot(new_opp_controls);
+    add_feature(kNextGoodCapture(GetMostValuablePieceType(expected_good_capture, new_eb)));
+  }
+
+  //
+  // 移動手の特徴
+  //
+  if (   !move.is_drop()
+      && see_sign == 0) {
+    // 移動方向（前か、横か、後ろか） [指した駒][移動元の段][Y座標の増減]
+    int delta_y = math::sign(int(dst.rank() - src.rank()));
+    add_feature(kDeltaCoordinateY(pt, src.rank(), delta_y));
+
+    // 5筋とのX距離の増減
+    {
+      int distance_to_center1 = std::abs(int(src.file() - kFile5));
+      int distance_to_center2 = std::abs(int(dst.file() - kFile5));
+      int delta = math::sign(distance_to_center2 - distance_to_center1);
+      add_feature(kDeltaDistanceFromCenter(pt, delta));
+    }
+
+    // そっぽ手判定（自陣の駒） [指した駒][移動元と自玉とのX距離][自玉とのX距離の増減]
+    if (move.from().is_promotion_zone_of(~kColor)) {
+      int x_distance_to_own_king1 = std::abs(int(move.from().file() - own_ksq.file()));
+      int x_distance_to_own_king2 = std::abs(int(move.to().file() - own_ksq.file()));
+      int delta = math::sign(int(x_distance_to_own_king2 - x_distance_to_own_king1));
+      add_feature(kIsGoingAwayFromOwnKing(pt, std::min(x_distance_to_own_king1, 7), delta));
+
+    // そっぽ手判定（敵陣の駒） [指した駒][移動元と敵玉とのX距離][敵玉とのX距離の増減]
+    } else if (move.from().is_promotion_zone_of(kColor)) {
+      int x_distance_to_opp_king1 = std::abs(int(move.from().file() - opp_ksq.file()));
+      int x_distance_to_opp_king2 = std::abs(int(move.to().file() - opp_ksq.file()));
+      int delta = math::sign(int(x_distance_to_opp_king2 - x_distance_to_opp_king1));
+      add_feature(kIsGoingAwayFromOwnKing(pt, std::min(x_distance_to_opp_king1, 7), delta));
+    }
+
+    // 動くと取られてしまう最高の駒（原因：ピン）
+    DirectionSet opp_long_controls = old_eb.long_controls(~kColor, move.from());
+    if (opp_long_controls.any()) {
+      Bitboard opp_xray_attacks = queen_attacks_bb(move.from(), new_occ)
+                                & direction_bb(move.from(), opp_long_controls)
+                                & ~line_bb(move.from(), move.to());
+      Bitboard xray_targets = pos.pieces(kColor) & new_occ & opp_xray_attacks;
+      Bitboard victims = (xray_targets & new_opp_controls).andnot(new_own_controls);
+      PieceType most_valuable_victim = GetMostValuablePieceType(victims, new_eb);
+      add_feature(kOpponentXrayThreat(pt, most_valuable_victim));
+    }
+
+    // 駒の自由度 [指した駒][相手の利きがなく、移動可能なマス]
+    if (see_sign == 0) {
+      Bitboard safe_moves = new_attacks.andnot(new_own_pieces | new_opp_controls);
+      add_feature(kDegreeOfLibertyAfterMove(pt, std::min(safe_moves.count(), 12)));
+    }
+
+    // 元いた場所に戻る手 [指した駒]
+    if (   previous_move2.is_real_move()
+        && move.from() == previous_move2.to()
+        && !previous_move2.is_drop()
+        && move.to() == previous_move2.from()
+        && !move.is_capture_or_promotion()
+        && !previous_move2.is_capture_or_promotion()) {
+      add_feature(kSuccessiveMoveOfSamePiece(pt));
+    }
+
+    // 自陣の駒打ちのスキを増やしてしまう手 [指す駒][相手の持ち駒][スキが増えるか否か]
+    if (   !move.is_capture_or_promotion()
+        && !move_gives_check) {
+      auto tests_move_makes_holes_in_our_area = [&](PieceType opp_drop_pt) {
+        if (pos.hand(~kColor).has(opp_drop_pt)) {
+          // 自陣の中で、相手が駒打を打てる場所を求める
+          Bitboard drop_target = promotion_zone_bb(~kColor);
+          if (opp_drop_pt == kPawn || opp_drop_pt == kLance) {
+            drop_target &= rank_bb<kColor, 7, 8>();
+          } else if (opp_drop_pt == kKnight) {
+            drop_target &= rank_bb<kColor, 7, 7>();
+          }
+
+          // 駒を打たれても取り返せない場所を求める
+          Bitboard old_drop_threat = drop_target.andnot(old_occ | old_own_controls);
+          Bitboard new_drop_threat = drop_target.andnot(new_occ | new_own_controls);
+
+          bool increases_holes = new_drop_threat.count() > old_drop_threat.count();
+          add_feature(kMakesHolesInOurArea(pt, opp_drop_pt, increases_holes));
+        }
+      };
+      tests_move_makes_holes_in_our_area(kPawn  );
+      tests_move_makes_holes_in_our_area(kLance );
+      tests_move_makes_holes_in_our_area(kKnight);
+      tests_move_makes_holes_in_our_area(kSilver);
+      tests_move_makes_holes_in_our_area(kGold  );
+      tests_move_makes_holes_in_our_area(kBishop);
+      tests_move_makes_holes_in_our_area(kRook  );
+    }
+  }
+
+  //
+  // 打つ手の特徴
+  //
+  if (move.is_drop()) {
+    // 持ち駒の枚数 [打つ駒][持ち駒の枚数]
+    add_feature(kNumHandPieces(pt, std::min(pos.hand(kColor).count(pt), 3)));
+
+    // 安全に成れるマスの数 [打つ駒][安全に成れるマスの数]
+    if (   promotion_zone_bb(kColor).test(to_bb)
+        && see_sign == 0) {
+      Bitboard safe_promotions = new_attacks.andnot(new_own_pieces | new_opp_controls);
+      add_feature(kNumSafePromotions(pt, std::min(safe_promotions.count(), 4)));
+    }
+
+    // 駒の自由度 [指した駒][相手の利きがなく、移動可能なマス]
+    if (see_sign == 0) {
+      Bitboard safe_moves = new_attacks.andnot(new_own_pieces | new_opp_controls);
+      add_feature(kDegreeOfLibertyAfterDrop(pt, std::min(safe_moves.count(), 12)));
+    }
+  }
+
+  //
+  // パターン
+  //
+  // 駒が安全に移動できるマスのパターン [指した駒][段][安全に移動できるマスのパターン]
+  if (   !move.is_capture_or_promotion()
+      && !move_gives_check
+      && see_sign == 0) {
+    auto flip = [](DirectionSet ds) {
+      DirectionSet flipped;
+      flipped.set(kDirNE, ds.test(kDirSW));
+      flipped.set(kDirE , ds.test(kDirW ));
+      flipped.set(kDirSE, ds.test(kDirNW));
+      flipped.set(kDirN , ds.test(kDirS ));
+      flipped.set(kDirS , ds.test(kDirN ));
+      flipped.set(kDirNW, ds.test(kDirSE));
+      flipped.set(kDirW , ds.test(kDirE ));
+      flipped.set(kDirSW, ds.test(kDirNE));
+      return flipped;
+    };
+    Bitboard safe_moves = new_attacks.andnot(new_own_pieces | new_opp_controls);
+    DirectionSet pattern = safe_moves.neighborhood8(move.to());
+    if (kColor == kWhite) {
+      pattern = flip(pattern);
+    }
+    add_feature(kPatternOfSafeMoves(pt, dst.rank(), pattern));
+  }
+
+  //
+  // 悪形手
+  //
+  {
+    // 敵飛先の敵歩前に歩を突く
+    if (IsPawnPushToOppRook(move, pos)) {
+      add_feature(kPawnPushToOppRook());
+    }
+  }
+
+  //
+  // 移動元・移動先に関する特徴
+  //
+  if (move.is_drop()) {
+    Square to = move.to();
+
+    // 段 [指した駒][段]
+    if (see_sign >= 0) {
+      add_feature(kDropRank(pt, relative_rank(kColor, to.rank())));
+    }
+
+    // 周囲15マス（縦5マスx横3マス）の駒の配置 [指した駒][方向（左右対称）][近傍の駒][味方利きの有無][相手利きの有無]
+    FifteenNeighborhoods pieces = new_eb.GetFifteenNeighborhoodPieces(to);
+    FifteenNeighborhoods own_controls = new_eb.GetFifteenNeighborhoodControls(kColor, to).LimitTo(1);
+    FifteenNeighborhoods opp_controls = new_eb.GetFifteenNeighborhoodControls(~kColor, to).LimitTo(1);
+    if (kColor == kWhite) {
+      pieces = pieces.Rotate180().FlipPieceColors();
+      own_controls = own_controls.Rotate180();
+      opp_controls = opp_controls.Rotate180();
+    }
+    add_feature(kDropNeighbors(pt,  0, Piece(pieces.at( 0)), own_controls.at( 0), opp_controls.at( 0)));;
+    add_feature(kDropNeighbors(pt,  1, Piece(pieces.at( 1)), own_controls.at( 1), opp_controls.at( 1)));;
+    add_feature(kDropNeighbors(pt,  2, Piece(pieces.at( 2)), own_controls.at( 2), opp_controls.at( 2)));;
+    add_feature(kDropNeighbors(pt,  3, Piece(pieces.at( 3)), own_controls.at( 3), opp_controls.at( 3)));;
+    add_feature(kDropNeighbors(pt,  4, Piece(pieces.at( 4)), own_controls.at( 4), opp_controls.at( 4)));;
+    add_feature(kDropNeighbors(pt,  5, Piece(pieces.at( 5)), own_controls.at( 5), opp_controls.at( 5)));;
+    add_feature(kDropNeighbors(pt,  6, Piece(pieces.at( 6)), own_controls.at( 6), opp_controls.at( 6)));;
+    add_feature(kDropNeighbors(pt,  7, Piece(pieces.at( 7)), own_controls.at( 7), opp_controls.at( 7)));;
+    add_feature(kDropNeighbors(pt,  8, Piece(pieces.at( 8)), own_controls.at( 8), opp_controls.at( 8)));;
+    add_feature(kDropNeighbors(pt,  9, Piece(pieces.at( 9)), own_controls.at( 9), opp_controls.at( 9)));;
+    add_feature(kDropNeighbors(pt,  0, Piece(pieces.at(10)), own_controls.at(10), opp_controls.at(10)));;
+    add_feature(kDropNeighbors(pt,  1, Piece(pieces.at(11)), own_controls.at(11), opp_controls.at(11)));;
+    add_feature(kDropNeighbors(pt,  2, Piece(pieces.at(12)), own_controls.at(12), opp_controls.at(12)));;
+    add_feature(kDropNeighbors(pt,  3, Piece(pieces.at(13)), own_controls.at(13), opp_controls.at(13)));;
+    add_feature(kDropNeighbors(pt,  4, Piece(pieces.at(14)), own_controls.at(14), opp_controls.at(14)));;
+
+    // 周囲8マス（縦3マスx横3マス）の駒の配置（段ごとに場合分け） [指した駒][段][方向（左右対称）][近傍の駒]
+    {
+      Rank rank = dst.rank();
+      // 10   5   0
+      // 11   6   1     0  3  0
+      // 12   7   2  => 1     1
+      // 13   8   3     2  4  2
+      // 14   9   4
+      add_feature(kDropNeighborsAndRank(pt, rank, 0, Piece(pieces.at( 1))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 1, Piece(pieces.at( 2))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 2, Piece(pieces.at( 3))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 3, Piece(pieces.at( 6))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 4, Piece(pieces.at( 8))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 0, Piece(pieces.at(11))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 1, Piece(pieces.at(12))));
+      add_feature(kDropNeighborsAndRank(pt, rank, 2, Piece(pieces.at(13))));
+    }
+
+    // 敵・味方の利き数の組み合わせ [指した駒][味方の利き数（最大2）][敵の利き数（最大2）]
+    {
+      int dst_own_controls = std::min(old_eb.num_controls(kColor, to), 2);
+      int dst_opp_controls = std::min(old_eb.num_controls(~kColor, to), 2);
+      add_feature(kDropControls(pt, dst_own_controls, dst_opp_controls));
+    }
+
+    // 敵・味方の長い利きの数（0から2まで） [指した駒][利き数（最大2）][どちらの利きか]
+    {
+      int dst_own_controls = std::min(old_eb.long_controls(kColor, to).count(), 2);
+      int dst_opp_controls = std::min(old_eb.long_controls(~kColor, to).count(), 2);
+      add_feature(kDropOwnLongControls(pt, dst_own_controls));
+      add_feature(kDropOppLongControls(pt, dst_opp_controls));
+    }
+
+    // 1手前との関係 [今回指した駒][1手前に指した駒][1手前の移動先との位置関係]
+    if (previous_move1.is_real_move()) {
+      PieceType previous_pt = previous_move1.piece_type();
+      Square previous_dst = previous_move1.to().relative_square(kColor);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kDropRelationToPreviousMove1(pt, previous_pt, dst_relation));
+    }
+    // 2手前との関係 [今回指した駒][2手前に指した駒][2手前の移動先との位置関係]
+    if (previous_move2.is_real_move()) {
+      PieceType previous_pt = previous_move2.piece_type();
+      Square previous_dst = previous_move2.to().relative_square(kColor);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kDropRelationToPreviousMove2(pt, previous_pt, dst_relation));
+    }
+    // 3手前との関係 [今回指した駒][3手前に指した駒][3手前の移動先との位置関係]
+    if (previous_move3.is_real_move()) {
+      PieceType previous_pt = previous_move3.piece_type();
+      Square previous_dst = previous_move3.to().relative_square(kColor);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kDropRelationToPreviousMove3(pt, previous_pt, dst_relation));
+    }
+    // 4手前との関係 [今回指した駒][4手前に指した駒][4手前の移動先との位置関係]
+    if (previous_move4.is_real_move()) {
+      PieceType previous_pt = previous_move4.piece_type();
+      Square previous_dst = previous_move4.to().relative_square(kColor);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kDropRelationToPreviousMove4(pt, previous_pt, dst_relation));
+    }
+
+    if (   !move_gives_check
+        && see_sign == 0) {
+      // 味方の飛車・龍との相対位置
+      for (Bitboard own_rooks = pos.pieces(kColor, kRook, kDragon); own_rooks.any(); ) {
+        Square rook_sq = own_rooks.pop_first_one().relative_square(kColor);
+        add_feature(kDropRelationToOwnRook(pt, Square::relation(dst, rook_sq)));
+      }
+
+      // 相手の飛車・龍との相対位置
+      for (Bitboard opp_rooks = pos.pieces(~kColor, kRook, kDragon); opp_rooks.any(); ) {
+        Square rook_sq = opp_rooks.pop_first_one().relative_square(kColor);
+        add_feature(kDropRelationToOppRook(pt, Square::relation(dst, rook_sq)));
+      }
+    }
+
+    // 自玉との相対位置
+    int dst_relation_to_own_king = Square::relation(dst, own_ksq.relative_square(kColor));
+    add_feature(kDropRelationToOwnKing(pt, dst_relation_to_own_king));
+
+    // 敵玉との相対位置
+    int dst_relation_to_opp_king = Square::relation(dst, opp_ksq.relative_square(kColor));
+    add_feature(kDropRelationToOppKing(pt, dst_relation_to_opp_king));
+
+    // 自玉との絶対位置 [自玉の位置][指した駒][マス]
+    {
+      Square own_ksq_m = own_ksq.relative_square(kColor);
+      Square dst_m = dst;
+      if (own_ksq_m.file() > kFile5) {
+        own_ksq_m = Square::mirror_horizontal(own_ksq_m);
+        dst_m = Square::mirror_horizontal(dst_m);
+      }
+      add_feature(kDropAbsRelationToOwnKing(own_ksq_m, pt, dst_m));
+    }
+
+    // 敵玉との絶対位置 [敵玉の位置][指した駒][マス]
+    {
+      Square opp_ksq_m = opp_ksq.relative_square(kColor);
+      Square dst_m = dst;
+      if (opp_ksq_m.file() > kFile5) {
+        opp_ksq_m = Square::mirror_horizontal(opp_ksq_m);
+        dst_m = Square::mirror_horizontal(dst_m);
+      }
+      add_feature(kDropAbsRelationToOppKing(opp_ksq_m, pt, dst_m));
+    }
+
+  } else {
     //
-    // 10. 歩の手筋
+    // 移動手の特徴
     //
-    case kPawn: {
+    // 移動元・移動先に関する特徴（後述）
+    // 移動方向
+    //   自玉との距離の増減 [移動元と自玉との距離][自玉との距離の増減]
+    //   敵玉との距離の増減 [移動元と敵玉との距離][敵玉との距離の増減]
+    //   移動方向（前か、横か、後ろか） [移動元の段][Y座標の増減]
+    //   5筋とのX距離の増減
+    //   そっぽ手判定（自陣の駒） [移動元と自玉とのX距離][自玉とのX距離の増減]
+    //   そっぽ手判定（敵陣の駒） [移動元と敵玉とのX距離][敵玉とのX距離の増減]
+    // 駒損の脅威の度合い
+    // 動くと取られてしまう最高の駒（原因：ピン）
+    // 動くと取られてしまう最高の駒（原因：ひもが外れる）
+
+    Square to = move.to();
+    Square from = move.from();
+
+    {
+      // 移動先周囲15マス（縦5マスx横3マス）の駒の配置 [指した駒][方向（左右対称）][近傍の駒][味方利きの有無][相手利きの有無]
+      FifteenNeighborhoods pieces = new_eb.GetFifteenNeighborhoodPieces(to);
+      FifteenNeighborhoods own_controls = new_eb.GetFifteenNeighborhoodControls(kColor, to).LimitTo(1);
+      FifteenNeighborhoods opp_controls = new_eb.GetFifteenNeighborhoodControls(~kColor, to).LimitTo(1);
+      if (kColor == kWhite) {
+        pieces = pieces.Rotate180().FlipPieceColors();
+        own_controls = own_controls.Rotate180();
+        opp_controls = opp_controls.Rotate180();
+      }
+      add_feature(kDstNeighbors(pt,  0, Piece(pieces.at( 0)), own_controls.at( 0), opp_controls.at( 0)));
+      add_feature(kDstNeighbors(pt,  1, Piece(pieces.at( 1)), own_controls.at( 1), opp_controls.at( 1)));
+      add_feature(kDstNeighbors(pt,  2, Piece(pieces.at( 2)), own_controls.at( 2), opp_controls.at( 2)));
+      add_feature(kDstNeighbors(pt,  3, Piece(pieces.at( 3)), own_controls.at( 3), opp_controls.at( 3)));
+      add_feature(kDstNeighbors(pt,  4, Piece(pieces.at( 4)), own_controls.at( 4), opp_controls.at( 4)));
+      add_feature(kDstNeighbors(pt,  5, Piece(pieces.at( 5)), own_controls.at( 5), opp_controls.at( 5)));
+      add_feature(kDstNeighbors(pt,  6, Piece(pieces.at( 6)), own_controls.at( 6), opp_controls.at( 6)));
+      add_feature(kDstNeighbors(pt,  7, Piece(pieces.at( 7)), own_controls.at( 7), opp_controls.at( 7)));
+      add_feature(kDstNeighbors(pt,  8, Piece(pieces.at( 8)), own_controls.at( 8), opp_controls.at( 8)));
+      add_feature(kDstNeighbors(pt,  9, Piece(pieces.at( 9)), own_controls.at( 9), opp_controls.at( 9)));
+      add_feature(kDstNeighbors(pt,  0, Piece(pieces.at(10)), own_controls.at(10), opp_controls.at(10)));
+      add_feature(kDstNeighbors(pt,  1, Piece(pieces.at(11)), own_controls.at(11), opp_controls.at(11)));
+      add_feature(kDstNeighbors(pt,  2, Piece(pieces.at(12)), own_controls.at(12), opp_controls.at(12)));
+      add_feature(kDstNeighbors(pt,  3, Piece(pieces.at(13)), own_controls.at(13), opp_controls.at(13)));
+      add_feature(kDstNeighbors(pt,  4, Piece(pieces.at(14)), own_controls.at(14), opp_controls.at(14)));
+
+      // 周囲8マス（縦3マスx横3マス）の駒の配置（段ごとに場合分け） [指した駒][段][方向（左右対称）][近傍の駒]
+      Rank rank = dst.rank();
+      // 10   5   0
+      // 11   6   1     0  3  0
+      // 12   7   2  => 1     1
+      // 13   8   3     2  4  2
+      // 14   9   4
+      add_feature(kDstNeighborsAndRank(pt, rank, 0, Piece(pieces.at( 1))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 1, Piece(pieces.at( 2))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 2, Piece(pieces.at( 3))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 3, Piece(pieces.at( 6))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 4, Piece(pieces.at( 8))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 0, Piece(pieces.at(11))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 1, Piece(pieces.at(12))));
+      add_feature(kDstNeighborsAndRank(pt, rank, 2, Piece(pieces.at(13))));
+    }
+
+    {
+      // 移動元周囲15マス（縦5マスx横3マス）の駒の配置 [指した駒][方向（左右対称）][近傍の駒][味方利きの有無][相手利きの有無]
+      FifteenNeighborhoods pieces = old_eb.GetFifteenNeighborhoodPieces(from);
+      FifteenNeighborhoods own_controls = old_eb.GetFifteenNeighborhoodControls(kColor, to).LimitTo(1);
+      FifteenNeighborhoods opp_controls = old_eb.GetFifteenNeighborhoodControls(~kColor, to).LimitTo(1);
+      if (kColor == kWhite) {
+        pieces = pieces.Rotate180().FlipPieceColors();
+        own_controls = own_controls.Rotate180();
+        opp_controls = opp_controls.Rotate180();
+      }
+      add_feature(kSrcNeighbors(pt,  0, Piece(pieces.at( 0)), own_controls.at( 0), opp_controls.at( 0)));
+      add_feature(kSrcNeighbors(pt,  1, Piece(pieces.at( 1)), own_controls.at( 1), opp_controls.at( 1)));
+      add_feature(kSrcNeighbors(pt,  2, Piece(pieces.at( 2)), own_controls.at( 2), opp_controls.at( 2)));
+      add_feature(kSrcNeighbors(pt,  3, Piece(pieces.at( 3)), own_controls.at( 3), opp_controls.at( 3)));
+      add_feature(kSrcNeighbors(pt,  4, Piece(pieces.at( 4)), own_controls.at( 4), opp_controls.at( 4)));
+      add_feature(kSrcNeighbors(pt,  5, Piece(pieces.at( 5)), own_controls.at( 5), opp_controls.at( 5)));
+      add_feature(kSrcNeighbors(pt,  6, Piece(pieces.at( 6)), own_controls.at( 6), opp_controls.at( 6)));
+      add_feature(kSrcNeighbors(pt,  7, Piece(pieces.at( 7)), own_controls.at( 7), opp_controls.at( 7)));
+      add_feature(kSrcNeighbors(pt,  8, Piece(pieces.at( 8)), own_controls.at( 8), opp_controls.at( 8)));
+      add_feature(kSrcNeighbors(pt,  9, Piece(pieces.at( 9)), own_controls.at( 9), opp_controls.at( 9)));
+      add_feature(kSrcNeighbors(pt,  0, Piece(pieces.at(10)), own_controls.at(10), opp_controls.at(10)));
+      add_feature(kSrcNeighbors(pt,  1, Piece(pieces.at(11)), own_controls.at(11), opp_controls.at(11)));
+      add_feature(kSrcNeighbors(pt,  2, Piece(pieces.at(12)), own_controls.at(12), opp_controls.at(12)));
+      add_feature(kSrcNeighbors(pt,  3, Piece(pieces.at(13)), own_controls.at(13), opp_controls.at(13)));
+      add_feature(kSrcNeighbors(pt,  4, Piece(pieces.at(14)), own_controls.at(14), opp_controls.at(14)));
+
+      // 周囲8マス（縦3マスx横3マス）の駒の配置（段ごとに場合分け） [指した駒][段][方向（左右対称）][近傍の駒]
+      Rank rank = dst.rank();
+      // 10   5   0
+      // 11   6   1     0  3  0
+      // 12   7   2  => 1     1
+      // 13   8   3     2  4  2
+      // 14   9   4
+      add_feature(kSrcNeighborsAndRank(pt, rank, 0, Piece(pieces.at( 1))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 1, Piece(pieces.at( 2))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 2, Piece(pieces.at( 3))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 3, Piece(pieces.at( 6))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 4, Piece(pieces.at( 8))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 0, Piece(pieces.at(11))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 1, Piece(pieces.at(12))));
+      add_feature(kSrcNeighborsAndRank(pt, rank, 2, Piece(pieces.at(13))));
+    }
+
+    // 敵・味方の利き数の組み合わせ [指した駒][味方の利き数（最大2）][敵の利き数（最大2）]
+    {
+      int src_own_controls = std::min(old_eb.num_controls(kColor, from), 2);
+      int src_opp_controls = std::min(old_eb.num_controls(~kColor, from), 2);
+      int dst_own_controls = std::min(old_eb.num_controls(kColor, to), 2);
+      int dst_opp_controls = std::min(old_eb.num_controls(~kColor, to), 2);
+      add_feature(kSrcControls(pt, src_own_controls, src_opp_controls));
+      add_feature(kDstControls(pt, dst_own_controls, dst_opp_controls));
+    }
+
+    // 1手前との関係 [今回指した駒][1手前に指した駒][1手前の移動先との位置関係]
+    if (previous_move1.is_real_move()) {
+      PieceType previous_pt = previous_move1.piece_type();
+      Square previous_dst = previous_move1.to().relative_square(kColor);
+      SquareRelation src_relation = Square::relation(src, previous_dst);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kSrcRelationToPreviousMove1(pt, previous_pt, src_relation));
+      add_feature(kDstRelationToPreviousMove1(pt, previous_pt, dst_relation));
+    }
+    // 2手前との関係 [今回指した駒][2手前に指した駒][2手前の移動先との位置関係]
+    if (previous_move2.is_real_move()) {
+      PieceType previous_pt = previous_move2.piece_type();
+      Square previous_dst = previous_move2.to().relative_square(kColor);
+      SquareRelation src_relation = Square::relation(src, previous_dst);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kSrcRelationToPreviousMove2(pt, previous_pt, src_relation));
+      add_feature(kDstRelationToPreviousMove2(pt, previous_pt, dst_relation));
+    }
+    // 3手前との関係 [今回指した駒][3手前に指した駒][3手前の移動先との位置関係]
+    if (previous_move3.is_real_move()) {
+      PieceType previous_pt = previous_move3.piece_type();
+      Square previous_dst = previous_move3.to().relative_square(kColor);
+      SquareRelation src_relation = Square::relation(src, previous_dst);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kSrcRelationToPreviousMove3(pt, previous_pt, src_relation));
+      add_feature(kDstRelationToPreviousMove3(pt, previous_pt, dst_relation));
+    }
+    // 4手前との関係 [今回指した駒][4手前に指した駒][4手前の移動先との位置関係]
+    if (previous_move4.is_real_move()) {
+      PieceType previous_pt = previous_move4.piece_type();
+      Square previous_dst = previous_move4.to().relative_square(kColor);
+      SquareRelation src_relation = Square::relation(src, previous_dst);
+      SquareRelation dst_relation = Square::relation(dst, previous_dst);
+      add_feature(kSrcRelationToPreviousMove4(pt, previous_pt, src_relation));
+      add_feature(kDstRelationToPreviousMove4(pt, previous_pt, dst_relation));
+    }
+
+    if (   !move.is_capture_or_promotion()
+        && !move_gives_check
+        && see_sign == 0) {
+      // 味方の飛車・龍との相対位置
+      for (Bitboard own_rooks = pos.pieces(kColor, kRook, kDragon); own_rooks.any(); ) {
+        Square rook_sq = own_rooks.pop_first_one().relative_square(kColor);
+        add_feature(kSrcRelationToOwnRook(pt, Square::relation(src, rook_sq)));
+        add_feature(kDstRelationToOwnRook(pt, Square::relation(dst, rook_sq)));
+      }
+
+      // 相手の飛車・龍との相対位置
+      for (Bitboard opp_rooks = pos.pieces(~kColor, kRook, kDragon); opp_rooks.any(); ) {
+        Square rook_sq = opp_rooks.pop_first_one().relative_square(kColor);
+        add_feature(kSrcRelationToOppRook(pt, Square::relation(src, rook_sq)));
+        add_feature(kDstRelationToOppRook(pt, Square::relation(dst, rook_sq)));
+      }
+    }
+
+    // 自玉との相対位置
+    int src_relation_to_own_king = Square::relation(src, own_ksq.relative_square(kColor));
+    int dst_relation_to_own_king = Square::relation(dst, own_ksq.relative_square(kColor));
+    add_feature(kSrcRelationToOwnKing(pt, src_relation_to_own_king));
+    add_feature(kDstRelationToOwnKing(pt, dst_relation_to_own_king));
+
+    // 敵玉との相対位置
+    int src_relation_to_opp_king = Square::relation(src, opp_ksq.relative_square(kColor));
+    int dst_relation_to_opp_king = Square::relation(dst, opp_ksq.relative_square(kColor));
+    add_feature(kSrcRelationToOppKing(pt, src_relation_to_opp_king));
+    add_feature(kDstRelationToOppKing(pt, dst_relation_to_opp_king));
+
+    // 自玉との絶対位置 [自玉の位置][指した駒][マス]
+    {
+      Square own_ksq_m = own_ksq.relative_square(kColor);
+      Square src_m = src;
+      Square dst_m = dst;
+      if (own_ksq_m.file() > kFile5) {
+        own_ksq_m = Square::mirror_horizontal(own_ksq_m);
+        src_m = Square::mirror_horizontal(src_m);
+        dst_m = Square::mirror_horizontal(dst_m);
+      }
+      add_feature(kSrcAbsRelationToOwnKing(own_ksq_m, pt, src_m));
+      add_feature(kDstAbsRelationToOwnKing(own_ksq_m, pt, dst_m));
+    }
+
+    // 敵玉との絶対位置 [敵玉の位置][指した駒][マス]
+    {
+      Square opp_ksq_m = opp_ksq.relative_square(kColor);
+      Square src_m = src;
+      Square dst_m = dst;
+      if (opp_ksq_m.file() > kFile5) {
+        opp_ksq_m = Square::mirror_horizontal(opp_ksq_m);
+        src_m = Square::mirror_horizontal(src_m);
+        dst_m = Square::mirror_horizontal(dst_m);
+      }
+      add_feature(kSrcAbsRelationToOppKing(opp_ksq_m, pt, src_m));
+      add_feature(kDstAbsRelationToOppKing(opp_ksq_m, pt, dst_m));
+    }
+  }
+
+  //
+  // 駒ごとの指し手の特徴
+  //
+  switch (pt) {
+    case kPawn : {
       const auto relative_dir = [](Direction d) -> Direction {
         return kColor == kBlack ? d : inverse_direction(d);
       };
+      const DirectionSet opp_long_controls = old_eb.long_controls(~kColor, move.to());
       const Square delta_n = Square::direction_to_delta(relative_dir(kDirN));
       const Square delta_s = Square::direction_to_delta(relative_dir(kDirS));
       const Square north_sq = move.to() + delta_n;
       const Square south_sq = move.to() + delta_s;
 
       if (move.is_drop()) {
-        const Bitboard occ = pos.pieces();
-        const DirectionSet opp_long_controls = ext_board.long_controls(~kColor, move.to());
+        Bitboard own_area_or_own_pieces = old_own_pieces | promotion_zone_bb(~kColor);
 
-        // 直射止めの歩（相手の飛・香の、自陣に対する利きを遮る手）
         if (   opp_long_controls.test(relative_dir(kDirS))
-            && move.to().rank() == relative_rank(kColor, kRank7)) {
-          add_feature(kInterceptAttacksToOurAreaByPawn());
-        }
+            && rank_bb<kColor, 2, 7>().test(move.to())) {
+          Bitboard opp_lance_attacks = lance_attacks_bb(move.to(), old_occ, ~kColor);
 
-#if 0
-        // FIXME 一致率マイナス
-        // 垂れ歩（２〜４段目に、敵の駒に当てないで歩を打つ手）[ひとつ上の味方の利きの有無][同・敵の利きの有無]
-        if (   rank_bb<kColor, 2, 4>().test(move.to())
-            && !step_attacks_bb(Piece(kColor, kPawn), move.to()).test(pos.pieces())) {
-          bool north_supported = ext_board.num_controls(kColor, north_sq) > 0;
-          bool north_attacked = ext_board.num_controls(~kColor, north_sq) > 0;
-          add_feature(kDanglingPawn(north_supported, north_attacked));
+          if (opp_lance_attacks.test(own_area_or_own_pieces)) {
+            // 直射止めの歩（相手の飛・香の、自陣または味方の駒への直射を止める歩を打つ手）
+            if (pos.num_controls(kColor, move.to()) >= 1) {
+              add_feature(kPawnDropInterception());
+
+            // 歩を打って、飛香の利きを止める手 [何枚歩を打てば利きが止まるか] （連打の歩を意識）
+            } else if (pos.hand(kColor).count(kPawn) >= 2) {
+              Bitboard block_point = old_own_controls.andnot(pos.pieces());
+              if (opp_lance_attacks.test(block_point)) {
+                int min_distance = 8;
+                (opp_lance_attacks & old_own_controls).ForEach([&](Square sq) {
+                  if (pos.num_controls(~kColor, sq) == 1) {
+                    int distance = Square::distance(north_sq, sq);
+                    if (distance < min_distance) {
+                      min_distance = distance;
+                    }
+                  }
+                });
+                if (pos.hand(kColor).count(kPawn) >= min_distance) {
+                  add_feature(kSuccessivePawnDrops(min_distance));
+                }
+              }
+            }
+          }
         }
-#endif
 
         // 底歩を打って、飛車の横利きを止める手 [上にある駒]
         if (   move.to().rank() == relative_rank(kColor, kRank9)
             && pos.piece_on(north_sq) != kNoPiece
             && pos.piece_on(north_sq).is(kColor)
+            && pos.num_controls(kColor, move.to()) >= 1
             && (opp_long_controls.test(kDirE) || opp_long_controls.test(kDirW))) {
           add_feature(kAnchorByPawn(pos.piece_on(north_sq).type()));
         }
 
-        // 歩を打って、飛香の利きを止める手 [何枚歩を打てば利きが止まるか] （連打の歩を意識）
-        constexpr BitSet<Piece, 32> kLanceRookDragon(Piece(~kColor, kLance),
-                                                     Piece(~kColor, kRook),
-                                                     Piece(~kColor, kDragon));
-        if (   kLanceRookDragon.test(pos.piece_on(north_sq))
-            && pos.num_controls(kColor, move.to()) == 0
-            && pos.hand(kColor).count(kPawn) >= 2
-            && move.to().rank() != relative_rank(kColor, kRank9)) {
-          Bitboard opp_attacks = lance_attacks_bb(move.to(), occ, ~kColor);
-          Bitboard block_point = pos_info.defended_squares.andnot(pos.pieces());
-          if (opp_attacks.test(block_point)) { // 利きを止める場所があるか
-            int min_distance = 8;
-            (opp_attacks & pos_info.defended_squares).ForEach([&](Square sq) {
-              if (pos.num_controls(~kColor, sq) == 1) {
-                int distance = Square::distance(north_sq, sq);
-                if (distance < min_distance) {
-                  min_distance = distance;
-                }
-              }
-            });
-            if (pos.hand(kColor).count(kPawn) >= min_distance) {
-              add_feature(kSuccessivePawnDrops(min_distance));
-            }
-          }
-        }
-
-#if 0
-        // FIXME 出現数が少なすぎて、一致率に影響なし
         // 蓋歩（敵の飛車の退路を断つ歩）
         if (   rank_bb<kColor, 5, 8>().test(move.to())
-            && pos.piece_on(south_sq) == Piece(~kColor, kRook)) {
-          Bitboard new_occ = pos.pieces() | square_bb(move.to());
+            && pos.piece_on(south_sq) == Piece(~kColor, kRook)
+            && pos.num_controls(kColor, move.to()) >= 1) {
           Bitboard rook_moves = rook_attacks_bb(south_sq, new_occ);
-          Bitboard blocked = pos.pieces(~kColor) | pos_info.defended_squares;
-          Bitboard rook_evasions = rook_moves.andnot(blocked);
-          if (rook_evasions.none()) {
-            add_feature(kCutOffTheRookRetreatByPawn());
+          Bitboard blocked = new_opp_pieces | new_own_controls;
+          Bitboard safe_rook_evasions = rook_moves.andnot(blocked);
+          if (safe_rook_evasions.none()) {
+            add_feature(kRookRetreatCutOffByPawn());
           }
         }
-#endif
 
-#if 0
-        // FIXME 一致率マイナス
-        // 控えの歩（自陣において、敵駒に当てないで打つ歩）[ひとつ上の味方の利きの有無][同・敵の利きの有無]
-        if (   rank_bb<kColor, 8, 9>().test(move.to())
-            && pos.piece_on(north_sq) == kNoPiece) {
-          bool own_control = pos.num_controls(kColor, north_sq) > 0;
-          bool opp_control = pos.num_controls(~kColor, north_sq) > 0;
-          add_feature(kPawnTowardsTheRear(own_control, opp_control));
-        }
-#endif
-      } else if (move.is_promotion()) {
-        // 成り捨ての歩 [相手玉との距離]
-        if (   ext_board.num_controls(kColor, move.to()) == 1
-            && !ext_board.long_controls(kColor, move.to()).test(relative_dir(kDirN))
-            && ext_board.num_controls(~kColor, move.to()) != 0) {
-          int distance_to_king = Square::distance(opp_ksq, move.to());
-          add_feature(kPawnSacrificePromotion(distance_to_king));
-        }
-      } else { // 打つ手でも、成る手でもない場合
+      } else if (!move.is_capture_or_promotion()) {
+        // 端歩を突く手 [玉とのX距離]
         if (move.to().file() == kFile1 || move.to().file() == kFile9) {
-          // 端歩を突く手 [玉とのX距離]
           int x_distance = std::abs(move.to().file() - opp_ksq.file());
           add_feature(kEdgePawnPush(x_distance));
-
-#if 0
-          // FIXME 一致率 -0.02%
-          // 端攻めの歩 [min(持ち駒の歩の枚数, 5)]
-          int num_hand_pawns = pos.hand(kColor).count(kPawn);
-          add_feature(kEdgePawnAttackWithHandPawns(std::min(num_hand_pawns, 5)));
-
-          // FIXME 一致率 -0.03%
-          // 端攻めの歩 [min(持ち駒の桂の枚数, 3)]
-          int num_hand_knights = pos.hand(kColor).count(kKnight);
-          add_feature(kEdgePawnAttackWithHandKnights(std::min(num_hand_knights, 3)));
-#endif
         }
-      }
-
-      // 継ぎ歩から垂れ歩（同〜と取られたら、次に相手の利きのない場所に垂れ歩を打てる手）
-      if (   rank_bb<kColor, 2, 4>().test(move.to())
-          && pos.piece_on(north_sq) == Piece(~kColor, kPawn)
-          && pos.hand(kColor).count(kPawn) >= (move.is_drop() ? 2 : 1)
-          && pos.num_controls(~kColor, north_sq) == 0) {
-        add_feature(kJoiningPawnBeforeDanglingPawn());
       }
 
       // 銀バサミの歩
@@ -1041,57 +1699,18 @@ MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
       if (   rank_bb<4, 6>().test(move.to())
           && side_bb.test(pos.pieces(~kColor, kSilver))
           && pos.num_controls(~kColor, move.to()) == 0) {
-        Bitboard side_silvers = side_bb & pos.pieces(~kColor, kSilver);
-        side_silvers.ForEach([&](Square sq) {
+        (pos.pieces(~kColor, kSilver) & side_bb).ForEach([&](Square sq) {
           Bitboard silver_moves = step_attacks_bb(Piece(~kColor, kSilver), sq);
-          Bitboard blocked = pos.pieces(~kColor) | pos_info.defended_squares;
-          if (silver_moves.andnot(blocked).none()) { // 相手の銀が逃げるマスがない場合
+          Bitboard blocked = pos.pieces(~kColor) | new_own_controls;
+          Bitboard safe_silver_moves = silver_moves.andnot(blocked);
+          if (safe_silver_moves.none()) { // 相手の銀が逃げるマスがない場合
             add_feature(kSilverPincerPawn());
           }
         });
       }
-
-      // 桂頭の歩 [相手の桂馬が逃げられるマスの数(0~2)]
-      if (   move.to().rank() == relative_rank(kColor, kRank4)
-          && pos.piece_on(north_sq) == Piece(~kColor, kKnight)) {
-        Bitboard knight_moves = step_attacks_bb(Piece(~kColor, kKnight), north_sq);
-        Bitboard blocked = pos.pieces(~kColor) | pos_info.defended_squares;
-        int num_knight_evasions = knight_moves.andnot(blocked).count();
-        add_feature(kAttackToKnightByPawn(num_knight_evasions));
-      }
-
-      // 同歩と取られたら、次に桂頭に歩を打てる手
-      if (   move.to().rank() == relative_rank(kColor, kRank5)
-          && pos.piece_on(north_sq + delta_n) == Piece(~kColor, kKnight)
-          && pos.piece_on(north_sq) == Piece(~kColor, kPawn)
-          && pos.hand(kColor).count(kPawn) >= (move.is_drop() ? 2 : 1)
-          && pos.num_controls(kColor, move.to()) == 0
-          && pos.num_controls(~kColor, north_sq) == 0) {
-        add_feature(kPawnSacrificeBeforeAttackToKnight());
-      }
-
-      // 味方の飛角の利きを止めている敵の歩に対して、歩で当たりをかける手 [飛角の隠れた利きが付いている敵の駒][その駒への敵の利きの有無]
-      if (   move.to().rank() != relative_rank(kColor, kRank1)
-          && pos.piece_on(north_sq) == Piece(~kColor, kPawn)) {
-        DirectionSet long_controls = pos.long_controls(kColor, north_sq);
-        DirectionSet diagonal_or_vertical = long_controls.reset(kDirN).reset(kDirS);
-        for (Direction dir : diagonal_or_vertical) {
-          Square delta = Square::direction_to_delta(dir);
-          for (Square sq = north_sq + delta;
-              sq.IsOk() && Square::distance(sq, sq - delta); sq += delta) {
-            Piece piece = pos.piece_on(sq);
-            if (piece != kNoPiece) {
-              bool own_control = pos.num_controls(kColor, sq) > 0;
-              bool opp_control = pos.num_controls(~kColor, sq) > 0;
-              if (kColor == kWhite) piece = piece.opponent_piece();
-              add_feature(kAttackToObstructingPawn(piece, own_control, opp_control));
-              break;
-            }
-          }
-        }
-      }
-    }
       break;
+    }
+
 
     //
     // 11. 香の手筋
@@ -1100,17 +1719,23 @@ MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
       const Bitboard opp_non_pawn_pieces = pos.pieces(~kColor).andnot(pos.pieces(kPawn));
 
       // 香車の利きの先にある駒を調べる
-      if (attacks.test(opp_non_pawn_pieces)) {
-        Square target_sq1 = (attacks & opp_non_pawn_pieces).first_one();
+      if (   move.is_drop()
+          && see_sign == 0
+          && new_attacks.test(opp_non_pawn_pieces)) {
+        Square target_sq1 = (new_attacks & opp_non_pawn_pieces).first_one();
         PieceType target_pt1 = pos.piece_on(target_sq1).type();
 
         // 敵の駒に利きを付ける手 [駒の種類][相手が歩で受けられるか否か]（底歩に対する香打ち等を意識）
-        Bitboard pawn_files = Bitboard::FileFill(pos.pieces(~kColor, kPawn));
+        Bitboard opp_pawns = pos.pieces(~kColor, kPawn);
+        Bitboard same_file = file_bb(move.to().file());
+        Bitboard opp_block_candidates = between_bb(move.to(), target_sq1)
+                                      & new_opp_controls;
         bool pawn_block_possible =   pos.hand(~kColor).has(kPawn)
-                                  && !pawn_files.test(move.to());
+                                  && !opp_pawns.test(same_file)
+                                  && opp_block_candidates.any();
         add_feature(kAttackByLance(target_pt1, pawn_block_possible));
 
-        // 田楽の香（歩の受けが利かない手に限る
+        // 田楽の香（歩の受けが利かない手に限る）
         if (!pawn_block_possible) {
           Bitboard xray_attacks = lance_attacks_bb(target_sq1, pos.pieces(), kColor);
           if (xray_attacks.test(opp_non_pawn_pieces)) {
@@ -1135,16 +1760,19 @@ MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
           add_feature(kFloatingLance());
         }
       }
-    }
+
       break;
+    }
 
     //
     // 12. 桂の手筋
     //
     case kKnight: {
       // 控えの桂（駒損しない、打つ手のみ）[桂が跳ねれば当たりになる相手の駒]
-      if (move.is_drop() && see_sign >= 0) {
-        attacks.ForEach([&](Square sq) {
+      if (move.is_drop() && see_sign == 0) {
+        Bitboard non_sacrifice = old_own_controls | ~old_opp_controls;
+        Bitboard opp_pawns = pos.pieces(~kColor, kPawn);
+        (new_attacks & non_sacrifice & opp_pawns).ForEach([&](Square sq) {
           Bitboard next_attacks = step_attacks_bb(Piece(kColor, kKnight), sq);
           (next_attacks & pos.pieces(~kColor)).ForEach([&](Square attack_sq) {
             PieceType pt_to_be_attacked = pos.piece_on(attack_sq).type();
@@ -1152,14 +1780,59 @@ MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
           });
         });
       }
-    }
       break;
+    }
 
     default:
       break;
   }
 
   return feature_list;
+}
+
+Array<float, kNumContinuousMoveFeatures> ExtractDynamicMoveFeatures(
+    const Move move, const HistoryStats& history, const GainsStats& gains,
+    const HistoryStats* countermoves_history,
+    const HistoryStats* followupmoves_history) {
+
+  const float kMaterialScale = 1.0f / float(Material::exchange_value(kDragon));
+  const float kHistoryScale = 1.0f / float(HistoryStats::kMax);
+
+  Array<float, kNumContinuousMoveFeatures> continuous_features;
+
+  // 静かな手の特徴
+  if (move.is_quiet()) {
+    // history value（-1から+1までの連続値）
+    float h = history[move];
+    continuous_features[kHistoryValue] = h * kHistoryScale;
+
+    // counter move history value（-1から+1までの連続値）
+    if (countermoves_history != nullptr) {
+      float cmh = (*countermoves_history)[move];
+      continuous_features[kCounterMoveHistoryValue] = cmh * kHistoryScale;
+    } else {
+      continuous_features[kCounterMoveHistoryValue] = 0.0f;
+    }
+
+    // follow-up move history value（-1から+1までの連続値）
+    if (followupmoves_history != nullptr) {
+      float fmh = (*followupmoves_history)[move];
+      continuous_features[kFollowupMoveHistoryValue] = fmh * kHistoryScale;
+    } else {
+      continuous_features[kFollowupMoveHistoryValue] = 0.0f;
+    }
+
+    // evaluation gain（-1＜龍損＞から+1＜龍得＞までの連続値）
+    float gain = gains[move];
+    continuous_features[kEvaluationGain] = gain * kMaterialScale;
+  } else {
+    continuous_features[kHistoryValue] = 0.0f;
+    continuous_features[kCounterMoveHistoryValue] = 0.0f;
+    continuous_features[kFollowupMoveHistoryValue] = 0.0f;
+    continuous_features[kEvaluationGain] = 0.0f;
+  }
+
+  return continuous_features;
 }
 
 MoveFeatureList ExtractMoveFeatures(Move move, const Position& pos,
@@ -1169,9 +1842,14 @@ MoveFeatureList ExtractMoveFeatures(Move move, const Position& pos,
        : ExtractMoveFeatures<kWhite>(move, pos, pos_info);
 }
 
-PositionInfo::PositionInfo(const Position& pos, const HistoryStats& history_stats,
-                           const GainsStats& gains_stats)
-    : history(history_stats), gains(gains_stats) {
+PositionInfo::PositionInfo(const Position& pos,
+                           const HistoryStats& history_stats,
+                           const GainsStats& gains_stats,
+                           const HistoryStats* cmh, const HistoryStats* fmh)
+    : history(history_stats),
+      gains(gains_stats),
+      countermoves_history(cmh),
+      followupmoves_history(fmh) {
   const Color stm = pos.side_to_move();
   const Square own_ksq = pos.king_square(stm);
   const Square opp_ksq = pos.king_square(~stm);

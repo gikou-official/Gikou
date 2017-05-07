@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -83,12 +83,21 @@ class Zobrist {
     return path_[ply % kPathTableSize][s][p];
   }
 
+  /**
+   * 経路上にあるnull moveのハッシュ値を返します.
+   * plyの奇偶で手番を判定できるため、手番による区別はありません。
+   */
+  static Key64 null_move_on_path(int ply) {
+    return null_move_on_path_[ply % kPathTableSize];
+  }
+
  private:
   static Key64 exclusion_;
   static ArrayMap<Key64, Color> null_move_;
   static ArrayMap<Key64, Square, Piece> psq_;
   static ArrayMap<Key64, Piece> hand_;
   static Array<ArrayMap<Key64, Square, Piece>, kPathTableSize> path_;
+  static Array<Key64, kPathTableSize> null_move_on_path_;
 };
 
 #endif /* ZOBRIST_H_ */

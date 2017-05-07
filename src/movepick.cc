@@ -1,12 +1,12 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * The MovePicker class below is derived from Stockfish 6.
  * Copyright (C) 2004-2008 Tord Romstad (Glaurung author)
  * Copyright (C) 2008-2015 Marco Costalba, Joona Kiiski, Tord Romstad (Stockfish author)
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -51,7 +51,7 @@ inline bool is_greater(const ExtMove& lhs, const ExtMove& rhs) {
 }
 
 inline bool has_good_score(const ExtMove& em) {
-  return em.score > (HistoryStats::kMax / 2);
+  return em.score > 0;
 }
 
 inline ExtMove* PickBest(ExtMove* begin, ExtMove* end) {
@@ -96,10 +96,10 @@ MovePicker::MovePicker(const Position& pos, const HistoryStats& history,
   end_bad_captures_ = moves_.end() - 1;
 
   // 指し手生成のカテゴリをセットする
-  if (pos.in_check()) {
-    stage_ = kEvasion;
-  } else if (depth >= 8 * kOnePly) {
+  if (depth >= MoveProbability::kAppliedDepth) {
     stage_ = kProbSearch;
+  } else if (pos.in_check()) {
+    stage_ = kEvasion;
   } else {
     stage_ = kMainSearch;
   }
@@ -147,7 +147,8 @@ MovePicker::MovePicker(const Position& pos, const HistoryStats& history,
 }
 
 MovePicker::MovePicker(const Position& pos, const HistoryStats& history,
-                       const GainsStats& gains, Move hash_move)
+                       const GainsStats& gains, Move hash_move,
+                       Score capture_threshold)
     : pos_(pos),
       history_(history),
       gains_(gains),
@@ -157,8 +158,7 @@ MovePicker::MovePicker(const Position& pos, const HistoryStats& history,
   end_ = moves_.begin();
 
   // 取る手のしきい値をセットする
-  PieceType last_captured = pos.last_move().captured_piece_type();
-  capture_threshold_ = Material::exchange_value(last_captured);
+  capture_threshold_ = capture_threshold;
 
   // ハッシュ手をセットする
   if (   hash_move != kMoveNone
@@ -291,8 +291,17 @@ void MovePicker::ScoreMoves<kCaptures>() {
 
 template<>
 void MovePicker::ScoreMoves<kQuiets>() {
+  HistoryStats* cmh = (ss_-1)->countermoves_history;
+  HistoryStats* fmh = (ss_-2)->countermoves_history;
   for (ExtMove* it = moves_.begin(); it != end_; ++it) {
-    it->score = history_[it->move];
+    Move move = it->move;
+    if (cmh != nullptr) {
+      it->score = history_[move] + (*cmh)[move];
+    } else if (fmh != nullptr) {
+      it->score = history_[move] + (*fmh)[move];
+    } else {
+      it->score = history_[move];
+    }
   }
 }
 
@@ -318,13 +327,17 @@ void MovePicker::GenerateNext() {
       cur_ = moves_.begin();
       end_ = GenerateMoves<kAllMoves>(pos_, cur_);
       end_ = RemoveIllegalMoves(pos_, cur_, end_);
+      size_t num_moves = end_ - cur_;
+
       // 指し手の実現確率を計算する
-      auto probabilities = MoveProbability::ComputeProbabilities(pos_, history_,
-                                                                 gains_);
+      const HistoryStats* cmh = (ss_-1)->countermoves_history;
+      const HistoryStats* fmh = (ss_-2)->countermoves_history;
+      std::valarray<double> probabilities = MoveProbability::ComputeProbabilitiesWithCache(
+          pos_, history_, gains_, cmh, fmh);
+
       // 指し手の実現確率が高い順にソートする
-      for (ExtMove* it = cur_; it != end_; ++it) {
-        double p = probabilities[it->move.ToUint32()];
-        it->score = static_cast<int>(double(1 << 30) * p);
+      for (size_t i = 0; i < num_moves; ++i) {
+        (cur_ + i)->score = static_cast<int>(double(1 << 30) * probabilities[i]);
       }
       SortMoves(cur_, end_);
       return;

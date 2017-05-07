@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -204,6 +204,8 @@ UsiGoOptions UsiProtocol::ParseGoCommand(std::istringstream& is,
     else if (token == "binc"       ) is >> options.inc[kBlack];
     else if (token == "winc"       ) is >> options.inc[kWhite];
     else if (token == "infinite"   ) options.infinite = true;
+    else if (token == "nodes"      ) is >> options.nodes;
+    else if (token == "depth"      ) is >> options.depth;
     else if (token == "mate"       ) {
       std::string time;
       is >> time;

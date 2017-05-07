@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -32,26 +32,50 @@ class GainsStats;
 typedef uint32_t MoveFeatureIndex;
 
 /**
+ * 探索により得られる、動的な指し手の特徴を表します.
+ */
+enum ContinuousMoveFeature {
+  kHistoryValue,
+  kCounterMoveHistoryValue,
+  kFollowupMoveHistoryValue,
+  kEvaluationGain,
+  kSeeValue,
+  kGlobalSeeValue,
+  kNumContinuousMoveFeatures
+};
+
+/**
  * 指し手の特徴のリストです.
  */
 struct MoveFeatureList : std::vector<MoveFeatureIndex> {
-  double history; // history値は連続値なので、別途保存場所を用意する
+  /**
+   * 連続値をとる特徴を格納する場所
+   */
+  Array<float, kNumContinuousMoveFeatures> continuous_values;
 };
 
+extern const int kNumBinaryMoveFeatures;
 extern const int kNumMoveFeatures;
-extern const int kHistoryFeatureIndex;
 
 /**
  * 指し手の特徴を抽出する際に用いる、局面の情報です.
  */
 struct PositionInfo {
-  PositionInfo(const Position&, const HistoryStats&, const GainsStats&);
+  PositionInfo(const Position& pos, const HistoryStats& history_stats,
+               const GainsStats& gains_stats, const HistoryStats* cmh,
+               const HistoryStats* fmh);
 
   /** history値の統計 */
   const HistoryStats& history;
 
   /** gain値の統計 */
   const GainsStats& gains;
+
+  /** countermoves history stats */
+  const HistoryStats* countermoves_history;
+
+  /** followupmoves history stats */
+  const HistoryStats* followupmoves_history;
 
   /** 敵の利きが付いているマス */
   Bitboard attacked_squares;
@@ -118,5 +142,13 @@ struct PositionInfo {
  */
 MoveFeatureList ExtractMoveFeatures(const Move move, const Position& pos,
                                     const PositionInfo& pos_info);
+
+/**
+ * 探索中に動的に値が変わる指し手の特徴（ヒストリー値など）を抽出します。
+ */
+Array<float, kNumContinuousMoveFeatures> ExtractDynamicMoveFeatures(
+    const Move move, const HistoryStats& history, const GainsStats& gains,
+    const HistoryStats* countermoves_history,
+    const HistoryStats* followupmoves_history);
 
 #endif /* MOVE_FEATURE_H_ */

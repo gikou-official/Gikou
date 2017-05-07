@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -55,10 +55,139 @@ PieceType FindLeastValuableAttacker(const Position& pos, Bitboard pieces,
   return kKing;
 }
 
+/**
+ * GlobalSwap内で用いられる、局面データです.
+ * 必要最低限のデータに絞ることで、PositionクラスよりもMakeMoveが高速になっています。
+ */
+class MinimumPos : public ExtendedBoard {
+ public:
+  MinimumPos(const Position& pos)
+      : ExtendedBoard(pos.extended_board()),
+        color_bb_(pos.color_bb()),
+        type_bb_(pos.type_bb()),
+        occupied_bb_(pos.pieces()),
+        side_to_move_(pos.side_to_move()) {
+  }
+
+  void MakeMove(Move move) {
+    // 1. 将棋盤を更新
+    if (move.is_drop()) {
+      Square to = move.to();
+      occupied_bb_.set(to);
+      color_bb_[side_to_move_].set(to);
+      type_bb_[move.piece_type()].set(to);
+      MakeDropMove(move);
+    } else if (move.is_capture()) {
+      Square from = move.from(), to = move.to();
+      occupied_bb_.reset(from);
+      color_bb_[side_to_move_].reset(from).set(to);
+      color_bb_[~side_to_move_].reset(to);
+      type_bb_[move.captured_piece_type()].reset(to);
+      type_bb_[move.piece_type()].reset(from);
+      type_bb_[move.piece_type_after_move()].set(to);
+      MakeCaptureMove(move);
+    } else {
+      Square from = move.from(), to = move.to();
+      occupied_bb_.reset(from).set(to);
+      color_bb_[side_to_move_].reset(from).set(to);
+      type_bb_[move.piece_type()].reset(from);
+      type_bb_[move.piece_type_after_move()].set(to);
+      MakeNonCaptureMove(move);
+    }
+
+    // 2. 手番を更新
+    side_to_move_ = ~side_to_move_;
+  }
+
+  Square FindMostValuablePiece(Bitboard pieces) const {
+    return FindPiece<true>(pieces);
+  }
+
+  Square FindLeastValuablePiece(Bitboard pieces) const {
+    return FindPiece<false>(pieces);
+  }
+
+  Bitboard AttackersTo(Square to) const {
+    Bitboard black = color_bb_[kBlack];
+    Bitboard white = color_bb_[kWhite];
+    Bitboard hdk = type_bb(kHorse, kDragon, kKing);
+    Bitboard rd  = type_bb(kRook, kDragon);
+    Bitboard bh  = type_bb(kBishop, kHorse);
+    Bitboard golds = golds_bb();
+    Bitboard occ = occupied_bb_;
+    return (attackers_to<kBlack, kKing  >(to, occ) & hdk                     )
+         | (attackers_to<kBlack, kRook  >(to, occ) & rd                      )
+         | (attackers_to<kBlack, kBishop>(to, occ) & bh                      )
+         | (attackers_to<kBlack, kGold  >(to, occ) & golds            & black)
+         | (attackers_to<kWhite, kGold  >(to, occ) & golds            & white)
+         | (attackers_to<kBlack, kSilver>(to, occ) & type_bb(kSilver) & black)
+         | (attackers_to<kWhite, kSilver>(to, occ) & type_bb(kSilver) & white)
+         | (attackers_to<kBlack, kKnight>(to, occ) & type_bb(kKnight) & black)
+         | (attackers_to<kWhite, kKnight>(to, occ) & type_bb(kKnight) & white)
+         | (attackers_to<kBlack, kLance >(to, occ) & type_bb(kLance ) & black)
+         | (attackers_to<kWhite, kLance >(to, occ) & type_bb(kLance ) & white)
+         | (attackers_to<kBlack, kPawn  >(to, occ) & type_bb(kPawn  ) & black)
+         | (attackers_to<kWhite, kPawn  >(to, occ) & type_bb(kPawn  ) & white);
+  }
+
+  Bitboard pieces(Color c) const {
+    return color_bb_[c];
+  }
+
+  Bitboard pieces() const {
+    return occupied_bb_;
+  }
+
+  Color side_to_move() const {
+    return side_to_move_;
+  }
+
+ private:
+  template<bool kMost>
+  Square FindPiece(Bitboard pieces) const {
+    assert(pieces.any());
+
+    Square best_piece_square;
+    PieceType best_piece_type;
+    int best_piece_value = kMost ? -kScoreInfinite : kScoreInfinite;
+
+    pieces.ForEach([&](Square sq) {
+      PieceType piece_type = piece_on(sq).type();
+      int piece_value = piece_type == kKing ? 9999 : Material::exchange_value(piece_type);
+      // 最も価値の高い駒 or 最も価値の低い駒を更新する
+      if (kMost ? (piece_value > best_piece_value) : (piece_value < best_piece_value)) {
+        best_piece_square = sq;
+        best_piece_type   = piece_type;
+        best_piece_value  = piece_value;
+      }
+    });
+
+    return best_piece_square;
+  }
+
+  Bitboard golds_bb() const {
+    return type_bb(kGold, kPPawn, kPLance, kPKnight, kPSilver);
+  }
+
+  Bitboard type_bb(PieceType pt) const {
+    return type_bb_[pt];
+  }
+
+  template<typename ...Args>
+  Bitboard type_bb(PieceType pt1, Args... pt2) const {
+    return type_bb_[pt1] | type_bb(pt2...);
+  }
+
+  ArrayMap<Bitboard, Color> color_bb_;
+  ArrayMap<Bitboard, PieceType> type_bb_;
+  Bitboard occupied_bb_;
+  Color side_to_move_;
+};
+
 } // namespace
 
 Score Swap::Evaluate(const Move move, const Position& pos) {
-  assert(pos.MoveIsPseudoLegal(move));
+//  assert(pos.MoveIsPseudoLegal(move));
 
   Array<Score, 40> gain;
   const Square to = move.to();
@@ -150,4 +279,75 @@ bool Swap::IsLosing(Move move, const Position& pos) {
     return false;
   }
   return Evaluate(move, pos) < kScoreZero;
+}
+
+Score Swap::EvaluateGlobalSwap(const Move move, const Position& pos,
+                               const int depth_limit) {
+  assert(pos.MoveIsPseudoLegal(move));
+  assert(depth_limit <= 40);
+
+  auto get_material_gain = [](Move m) -> Score {
+    Score gain = Material::exchange_value(m.captured_piece_type());
+    if (m.is_promotion()) {
+      gain += Material::promotion_value(m.piece_type());
+    }
+    return gain;
+  };
+
+  Array<Score, 40> gain;
+
+  // 必要最低限の盤面データを準備する
+  MinimumPos min_pos(pos);
+
+  // 最初の１手について、駒割りの増分を求める
+  gain[0] = get_material_gain(move);
+
+  // 指し手に沿って局面を進める
+  min_pos.MakeMove(move);
+
+  int depth;
+  for (depth = 1; depth < depth_limit; ++depth) {
+    Color stm = min_pos.side_to_move();
+
+    // 取れる相手駒がないか調べる
+    Bitboard targets = min_pos.pieces(~stm) & min_pos.GetControlledSquares(stm);
+    if (targets.none()) {
+      break;
+    }
+
+    // 取れる相手駒のうち、最も高い駒を探す
+    Square victim_sq = min_pos.FindMostValuablePiece(targets);
+    Piece victim = min_pos.piece_on(victim_sq);
+    if (victim.is(kKing)) {
+      gain[depth++] = static_cast<Score>(9999);
+      break;
+    }
+
+    // 最も高い相手駒を取ることができる味方駒を列挙する
+    Bitboard attacker_candidates = min_pos.AttackersTo(victim_sq) & min_pos.pieces(stm);
+    assert(attacker_candidates.any());
+
+    // 最も高い相手駒を取ることができる味方駒のうち、最も安い駒を探す
+    Square attacker_sq = min_pos.FindLeastValuablePiece(attacker_candidates);
+    Piece attacker = min_pos.piece_on(attacker_sq);
+
+    // 「最も高い駒を、最も安い駒で取る手」を生成する（成れる場合は必ず成る）
+    Square from = attacker_sq, to = victim_sq;
+    bool promotion =   attacker.can_promote()
+                    && promotion_zone_bb(stm).test(square_bb(from) | square_bb(to));
+    Move best_capture(attacker, from, to, promotion, victim);
+
+    // 駒割りの増分を求める
+    gain[depth] = get_material_gain(best_capture) - gain[depth - 1];
+
+    // 生成された手に沿って局面を進める
+    min_pos.MakeMove(best_capture);
+  }
+
+  // ミニマックス計算をして、 盤面全体の駒交換の損得（Global SEE値）を求める
+  while (--depth > 0) {
+    gain[depth - 1] = std::min(-gain[depth], gain[depth - 1]);
+  }
+
+  return gain[0];
 }

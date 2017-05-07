@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -37,8 +37,11 @@ class Learning {
  public:
   /**
    * 評価関数パラメータの学習を開始します.
+   * @param use_rootstrap 学習時にRootStrapを併用する場合は、trueにする
+   * @param use_logistic_regression 学習時にロジスティック回帰（「激指」方式）を併用する場合は、true
    */
-  static void LearnEvaluationParameters();
+  static void LearnEvaluationParameters(bool use_rootstrap,
+                                        bool use_logistic_regression);
 };
 
 /**
@@ -118,16 +121,14 @@ inline PsqIndex RotatePsqIndex(PsqIndex psq) {
 
 /**
  * 評価関数の学習において、個々のパラメータを保持するためのクラスです.
- *
- * float型では勾配の計算の精度が不足すると考えられるので、double型を用いています。
- * Packクラスでは、内部的にSSE演算を用いているので、単純なdouble型よりも計算が高速化されています。
+ * Packクラスでは、内部的にSSE演算を用いているので、単純な浮動小数点型よりも計算が高速化されています。
  */
-typedef Pack<double, 4> PackedWeight;
+typedef Pack<float, 4> PackedWeight;
 
 /**
  * 次元下げを行うために拡張された評価パラメータです.
  */
-struct ExtendedParamsBase {
+struct ExtendedParams {
  public:
   /**
    * 各パラメータを更新する際に用いるファンクタです.
@@ -147,7 +148,7 @@ struct ExtendedParamsBase {
    */
   struct Accumulator {
    public:
-    Accumulator() : sum_(0.0) {}
+    Accumulator() : sum_(0.0f) {}
     void apply(PackedWeight n, const PackedWeight& item) {
       sum_ += n * item;
     }
@@ -158,7 +159,7 @@ struct ExtendedParamsBase {
     PackedWeight sum_;
   };
 
-  ExtendedParamsBase() {}
+  ExtendedParams() {}
 
   void Clear() {
     std::memset(this, 0, sizeof(*this));
@@ -197,7 +198,7 @@ struct ExtendedParamsBase {
     const PackedWeight sign = GetPackedSign3x1(kKingColor);
 
     // 駒の価値（２つのKPに分けて足し込むので、0.5ずつに分ける）
-    PackedWeight flip = 0.5 * GetPackedSign3x1(psq.piece().color());
+    PackedWeight flip = 0.5f * GetPackedSign3x1(psq.piece().color());
     op.apply(sign * flip, material[psq.piece().type()]);
 
     // 相対KP
@@ -218,12 +219,12 @@ struct ExtendedParamsBase {
   }
 
   /**
-   * KPについて、次元下げを行います.
+   * PPについて、次元下げを行います.
    */
   template<Color kColor, typename Operation>
   Operation EachPP(const PsqIndex idx1, const PsqIndex idx2, Operation op) {
     // PPは、先手視点・後手視点で２回加えられるので、係数を半分にしておく
-    const PackedWeight c = 0.5 * GetPackedSign2x2(kColor);
+    const PackedWeight c = 0.5f * GetPackedSign2x2(kColor);
 
     // ２つのインデックスが同じ場合
     if (idx1 == idx2) {
@@ -264,28 +265,6 @@ struct ExtendedParamsBase {
 
     // 絶対PP
     op.apply(sign * c, absolute_pp[i][j]);
-
-    return op;
-  }
-
-  template<typename Operation>
-  Operation ForEachControl(const Position& pos, Operation op) {
-    const Square bk = pos.king_square(kBlack);
-    const Square wk = pos.king_square(kWhite);
-    const ExtendedBoard& extended_board = pos.extended_board();
-
-    PsqControlList list = extended_board.GetPsqControlList();
-
-    for (const Square s : Square::all_squares()) {
-      PsqControlIndex index = list[s];
-      // 1. 先手玉との関係
-      op = EachControl<kBlack>(bk, index, op);
-      // 2. 後手玉との関係
-      // 注：KPとは異なり、インデックスの反転処理に時間がかかるため、インデックス＆符号の反転処理は行わず、
-      //  先手玉用・後手玉用の２つのテーブルを用意することで対応している。
-      //  その代わり、次元下げを行う段階で、インデックスの反転処理を行っている。
-      op = EachControl<kWhite>(wk, index, op);
-    }
 
     return op;
   }
@@ -355,7 +334,7 @@ struct ExtendedParamsBase {
    */
   template<Color kKingColor, typename Operation>
   Operation EachKingSafety(HandSet hs, Direction dir, Piece piece,
-                              int attacks, int defenses, Operation op) {
+                           int attacks, int defenses, Operation op) {
     assert(0 <= attacks && attacks <= 3);
     assert(0 <= defenses && defenses <= 3);
 
@@ -430,73 +409,6 @@ struct ExtendedParamsBase {
     return op;
   }
 
-  template<Color kKingColor, bool kMirrorHorizontally, typename Operation>
-  Operation ForEachKingSafety(const Position& pos, Operation op) {
-    const Square ksq = pos.king_square(kKingColor);
-
-    // 1. 相手の持ち駒のbit setを取得する
-    HandSet hs = pos.hand(~kKingColor).GetHandSet();
-
-    // 2. 穴熊かどうかを調べる
-    Square rksq = ksq.relative_square(kKingColor);
-    bool is_anaguma = (rksq == kSquare9I) || (rksq == kSquare1I);
-    // Hack: 持ち駒のbit setの1ビット目は未使用なので、穴熊か否かのフラグをbit setの1ビット目に立てておく
-    hs.set(kNoPieceType, is_anaguma);
-
-    // 3. 玉の周囲8マスの利き数と駒を取得する
-    const ExtendedBoard& eb = pos.extended_board();
-    EightNeighborhoods attacks = eb.GetEightNeighborhoodControls(~kKingColor, ksq);
-    EightNeighborhoods defenses = eb.GetEightNeighborhoodControls(kKingColor, ksq);
-    EightNeighborhoods pieces = eb.GetEightNeighborhoodPieces(ksq);
-    // 攻め方の利き数については、利き数の最大値を3に制限する
-    attacks = attacks.LimitTo(3);
-    // 受け方の利き数については、玉の利きを除外したうえで、最大値を3に制限する
-    defenses = defenses.Subtract(1).LimitTo(3);
-
-    // 4. 評価値テーブルを参照するためのラムダ関数を準備する
-    auto apply = [&](Direction dir, Operation o) -> Operation {
-      // 後手玉の場合は、将棋盤を180度反転させて、先手番の玉として評価する
-      Direction dir_i = kKingColor == kBlack ? dir : inverse_direction(dir);
-      // 玉が右側にいる場合は、左右反転させて、将棋盤の左側にあるものとして評価する
-      Direction dir_m = kMirrorHorizontally ? mirror_horizontally(dir_i) : dir_i;
-      // 盤上にある駒を取得する
-      Piece piece(pieces.at(dir_m));
-      assert(piece.IsOk());
-      // 後手玉を評価する場合は、周囲８マスの駒の先後を入れ替える
-      if (kKingColor == kWhite && !piece.is(kNoPieceType)) {
-        piece = piece.opponent_piece();
-      }
-      // 利き数を取得する
-      int attackers = attacks.at(dir_m);
-      int defenders = defenses.at(dir_m);
-      // テーブルから評価値を参照する
-      return EachKingSafety<kKingColor>(hs, dir, piece, attackers, defenders, o);
-    };
-
-    // 5. 玉の周囲8マスについて、玉の安全度評価の合計値を求める
-    op = apply(kDirNE, op);
-    op = apply(kDirE , op);
-    op = apply(kDirSE, op);
-    op = apply(kDirN , op);
-    op = apply(kDirS , op);
-    op = apply(kDirNW, op);
-    op = apply(kDirW , op);
-    op = apply(kDirSW, op);
-
-    return op;
-  }
-
-  template<Color kKingColor, typename Operation>
-  void ForEachKingSafety(const Position& pos, Operation op) {
-    // 玉が右側にいる場合は、左右反転させて、将棋盤の左側にあるものとして評価する
-    // これにより、「玉の左か右か」という観点でなく、「盤の端か中央か」という観点での評価を行うことができる
-    if (pos.king_square(kKingColor).relative_square(kKingColor).file() <= kFile4) {
-      ForEachKingSafety<kKingColor, true>(pos, op);
-    } else {
-      ForEachKingSafety<kKingColor, false>(pos, op);
-    }
-  }
-
   /**
    * 飛び駒の利きパラメータについて、次元下げを行います.
    */
@@ -545,124 +457,6 @@ struct ExtendedParamsBase {
     }
 
     return op;
-  }
-
-  template<Color kColor, typename Operation>
-  void ForEachSlidingPieces(const Position& pos, Operation op) {
-    Square own_ksq = pos.king_square(kColor);
-    Square opp_ksq = pos.king_square(~kColor);
-    if (kColor == kWhite) {
-      own_ksq = Square::rotate180(own_ksq);
-      opp_ksq = Square::rotate180(opp_ksq);
-    }
-
-    // 飛車の利きを評価
-    pos.pieces(kColor, kRook, kDragon).ForEach([&](Square from) {
-      Bitboard rook_target = pos.pieces() | ~rook_mask_bb(from);
-      Bitboard attacks = rook_attacks_bb(from, pos.pieces()) & rook_target;
-      assert(2 <= attacks.count() && attacks.count() <= 4);
-      if (kColor == kWhite) {
-        from = Square::rotate180(from);
-      }
-      while (attacks.any()) {
-        Square to = attacks.pop_first_one();
-        Piece threatened = pos.piece_on(to);
-        if (kColor == kWhite) {
-          to = Square::rotate180(to);
-          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
-        }
-        EachSliderControl<kColor, kRook>(kBlack, own_ksq, from, to, op);
-        EachSliderControl<kColor, kRook>(kWhite, opp_ksq, from, to, op);
-        EachThreat<kColor, kRook>(opp_ksq, to, threatened, op);
-      }
-    });
-
-    // 角の利きを評価
-    Bitboard edge = file_bb(kFile1) | file_bb(kFile9) | rank_bb(kRank1) | rank_bb(kRank9);
-    Bitboard bishop_target = pos.pieces() | edge;
-    pos.pieces(kColor, kBishop, kHorse).ForEach([&](Square from) {
-      Bitboard attacks = bishop_attacks_bb(from, pos.pieces()) & bishop_target;
-      assert(1 <= attacks.count() && attacks.count() <= 4);
-      if (kColor == kWhite) {
-        from = Square::rotate180(from);
-      }
-      while (attacks.any()) {
-        Square to = attacks.pop_first_one();
-        Piece threatened = pos.piece_on(to);
-        if (kColor == kWhite) {
-          to = Square::rotate180(to);
-          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
-        }
-        EachSliderControl<kColor, kBishop>(kBlack, own_ksq, from, to, op);
-        EachSliderControl<kColor, kBishop>(kWhite, opp_ksq, from, to, op);
-        EachThreat<kColor, kBishop>(opp_ksq, to, threatened, op);
-      }
-    });
-
-    // 香車の利きを評価
-    Bitboard lance_target = pos.pieces() | rank_bb(relative_rank(kColor, kRank1));
-    pos.pieces(kColor, kLance).ForEach([&](Square from) {
-      Bitboard attacks = lance_attacks_bb(from, pos.pieces(), kColor) & lance_target;
-      if (attacks.any()) {
-        assert(attacks.count() == 1);
-        Square to = attacks.first_one();
-        Piece threatened = pos.piece_on(to);
-        if (kColor == kWhite) {
-          from = Square::rotate180(from);
-          to = Square::rotate180(to);
-          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
-        }
-        EachSliderControl<kColor, kLance>(kBlack, own_ksq, from, to, op);
-        EachSliderControl<kColor, kLance>(kWhite, opp_ksq, from, to, op);
-        EachThreat<kColor, kLance>(opp_ksq, to, threatened, op);
-      }
-    });
-  }
-
-  /**
-   * パラメータをdelta分だけ更新します.
-   * 具体的には、損失関数の勾配の計算等に使用されます。
-   */
-  void UpdateParams(const Position& pos, const PsqList& list,
-                    const double delta, const double progress) {
-    const Color stm = pos.side_to_move();
-    const Square bk = pos.king_square(kBlack);
-    const Square wk = Square::rotate180(pos.king_square(kWhite));
-
-    PackedWeight coefficient3x1 = GetProgressCoefficient3x1(progress);
-    PackedWeight coefficient2x2 = GetProgressCoefficient2x2(progress, stm);
-    Updater updater3x1(coefficient3x1 * delta);
-    Updater updater2x2(coefficient2x2 * delta);
-
-    // 1. ２駒の関係
-    for (const PsqPair* i = list.begin(); i != list.end(); ++i) {
-      // a. KP（KPは、序盤・中盤・終盤と３通りに分かれている）
-      EachKP<kBlack>(bk, i->black(), updater3x1);
-      EachKP<kWhite>(wk, i->white(), updater3x1);
-      // b. PP（PPは、序盤・終盤 * 手番で、2*2=4通りに分かれている）
-      for (const PsqPair* j = list.begin(); j <= i; ++j) {
-        EachPP<kBlack>(i->black(), j->black(), updater2x2);
-        EachPP<kWhite>(i->white(), j->white(), updater2x2);
-      }
-    }
-
-    // 2. 各マスの利き
-    ForEachControl(pos, updater2x2);
-
-    // 3. 玉の安全度
-    ForEachKingSafety<kBlack>(pos, updater2x2);
-    ForEachKingSafety<kWhite>(pos, updater2x2);
-
-    // 4. 飛車・角の利き
-    ForEachSlidingPieces<kBlack>(pos, updater2x2);
-    ForEachSlidingPieces<kWhite>(pos, updater2x2);
-
-    // 5. 手番
-    // 注：手番の価値は、実際には２倍されるので、ここでは半分にしておく。
-    // 　　EvalDetail::ComputeFinalScore()も参照。
-    Updater tempo_updater(coefficient3x1 * delta);
-    PackedWeight sign(stm == kBlack ? 0.5 : -0.5);
-    tempo_updater.apply(sign, tempo);
   }
 
   // 駒割り
@@ -749,10 +543,10 @@ struct ExtendedParamsBase {
    * 進行度計算用の重みについては、先後反転されないことに注意してください。
    */
   static PackedWeight FlipWeights3x1(PackedWeight s) {
-    double opening     = -s[0]; // 序盤
-    double middle_game = -s[1]; // 中盤
-    double end_game    = -s[2]; // 終盤
-    double progress    = s[3];  // 進行度計算用の重み
+    float opening     = -s[0]; // 序盤
+    float middle_game = -s[1]; // 中盤
+    float end_game    = -s[2]; // 終盤
+    float progress    = s[3];  // 進行度計算用の重み
     return PackedWeight(opening, middle_game, end_game, progress);
   }
 
@@ -762,10 +556,10 @@ struct ExtendedParamsBase {
    * 手番用の重みについては、先後反転されないことに注意してください。
    */
   static PackedWeight FlipWeights2x2(PackedWeight s) {
-    double opening        = -s[0]; // 序盤
-    double opening_tempo  = s[1];  // 手番（序盤用）
-    double end_game       = -s[2]; // 終盤
-    double end_game_tempo = s[3];  // 手番（終盤用）
+    float opening        = -s[0]; // 序盤
+    float opening_tempo  = s[1];  // 手番（序盤用）
+    float end_game       = -s[2]; // 終盤
+    float end_game_tempo = s[3];  // 手番（終盤用）
     return PackedWeight(opening, opening_tempo, end_game, end_game_tempo);
   }
 
@@ -773,42 +567,335 @@ struct ExtendedParamsBase {
    * 手番によって、符号を反転させます（序盤・中盤・終盤と３つに分かれている場合）.
    */
   static PackedWeight GetPackedSign3x1(Color c) {
-    return c == kBlack ? PackedWeight(1.0) : FlipWeights3x1(PackedWeight(1.0));
+    return c == kBlack ? PackedWeight(1.0f) : FlipWeights3x1(PackedWeight(1.0f));
   }
 
   /**
    * 手番によって、符号を反転させます（序盤・終盤*手番に分かれていて、2*2=4通りある場合）.
    */
   static PackedWeight GetPackedSign2x2(Color c) {
-    return c == kBlack ? PackedWeight(1.0) : FlipWeights2x2(PackedWeight(1.0));
+    return c == kBlack ? PackedWeight(1.0f) : FlipWeights2x2(PackedWeight(1.0f));
+  }
+};
+
+/**
+ * 損失関数の勾配を集計するためのクラスです.
+ */
+struct Gradient {
+ public:
+  void Clear() {
+    std::memset(this, 0, sizeof(*this));
+  }
+
+  PackedWeight* begin() {
+    return reinterpret_cast<PackedWeight*>(this);
+  }
+
+  PackedWeight* end() {
+    return reinterpret_cast<PackedWeight*>(this) + size();
+  }
+
+  PackedWeight& operator[](size_t i) {
+    assert(i < size());
+    return *(begin() + i);
+  }
+
+  size_t size() const {
+    return sizeof(*this) / sizeof(PackedWeight);
+  }
+
+  void UpdateControl(const Position& pos, const PackedWeight& delta) {
+    const Square bk = pos.king_square(kBlack);
+    const Square wk = pos.king_square(kWhite);
+    const ExtendedBoard& extended_board = pos.extended_board();
+
+    PsqControlList list = extended_board.GetPsqControlList();
+
+    for (const Square s : Square::all_squares()) {
+      PsqControlIndex index = list[s];
+      // 1. 先手玉との関係
+      controls[kBlack][bk][index] += delta;
+      // 2. 後手玉との関係
+      // 注：KPとは異なり、インデックスの反転処理に時間がかかるため、インデックスと符号の反転処理は行わず、
+      // 先手玉用・後手玉用の２つのテーブルを用意することで対応している。
+      // その代わり、次元下げを行う段階で、インデックスと符号の反転処理を行っている。
+      controls[kWhite][wk][index] += delta;
+    }
+  }
+
+  template<Color kKingColor, bool kMirrorHorizontally>
+  void UpdateKingSafety(const Position& pos, const PackedWeight& delta) {
+    const Square ksq = pos.king_square(kKingColor);
+
+    // 1. 相手の持ち駒のbit setを取得する
+    HandSet hs = pos.hand(~kKingColor).GetHandSet();
+
+    // 2. 穴熊かどうかを調べる
+    Square rksq = ksq.relative_square(kKingColor);
+    bool is_anaguma = (rksq == kSquare9I) || (rksq == kSquare1I);
+    // Hack: 持ち駒のbit setの1ビット目は未使用なので、穴熊か否かのフラグをbit setの1ビット目に立てておく
+    hs.set(kNoPieceType, is_anaguma);
+
+    // 3. 玉の周囲8マスの利き数と駒を取得する
+    const ExtendedBoard& eb = pos.extended_board();
+    EightNeighborhoods attacks = eb.GetEightNeighborhoodControls(~kKingColor, ksq);
+    EightNeighborhoods defenses = eb.GetEightNeighborhoodControls(kKingColor, ksq);
+    EightNeighborhoods pieces = eb.GetEightNeighborhoodPieces(ksq);
+    // 攻め方の利き数については、利き数の最大値を3に制限する
+    attacks = attacks.LimitTo(3);
+    // 受け方の利き数については、玉の利きを除外したうえで、最大値を3に制限する
+    defenses = defenses.Subtract(1).LimitTo(3);
+
+    // 4. 評価値テーブルを参照するためのラムダ関数を準備する
+    auto update_gradient = [&](Direction dir) {
+      // 後手玉の場合は、将棋盤を180度反転させて、先手番の玉として評価する
+      Direction dir_i = kKingColor == kBlack ? dir : inverse_direction(dir);
+      // 玉が右側にいる場合は、左右反転させて、将棋盤の左側にあるものとして評価する
+      Direction dir_m = kMirrorHorizontally ? mirror_horizontally(dir_i) : dir_i;
+      // 盤上にある駒を取得する
+      Piece piece(pieces.at(dir_m));
+      assert(piece.IsOk());
+      // 後手玉を評価する場合は、周囲８マスの駒の先後を入れ替える
+      if (kKingColor == kWhite && !piece.is(kNoPieceType)) {
+        piece = piece.opponent_piece();
+      }
+      // 利き数を取得する
+      int attackers = attacks.at(dir_m);
+      int defenders = defenses.at(dir_m);
+      // 勾配を更新する
+      king_safety[hs][dir][piece][attackers][defenders] += delta;
+    };
+
+    // 5. 玉の周囲8マスについて、それぞれ勾配を更新する
+    update_gradient(kDirNE);
+    update_gradient(kDirE );
+    update_gradient(kDirSE);
+    update_gradient(kDirN );
+    update_gradient(kDirS );
+    update_gradient(kDirNW);
+    update_gradient(kDirW );
+    update_gradient(kDirSW);
+  }
+
+  template<Color kKingColor>
+  void UpdateKingSafety(const Position& pos, const PackedWeight& delta) {
+    // 玉が右側にいる場合は、左右反転させて、将棋盤の左側にあるものとして評価する
+    // これにより、「玉の左か右か」という観点でなく、「盤の端か中央か」という観点での評価を行うことができる
+    if (pos.king_square(kKingColor).relative_square(kKingColor).file() <= kFile4) {
+      UpdateKingSafety<kKingColor, true>(pos, delta);
+    } else {
+      UpdateKingSafety<kKingColor, false>(pos, delta);
+    }
+  }
+
+  template<Color kColor>
+  void UpdateSlidingPieces(const Position& pos, const PackedWeight& delta) {
+    Square own_ksq = pos.king_square(kColor);
+    Square opp_ksq = pos.king_square(~kColor);
+    if (kColor == kWhite) {
+      own_ksq = Square::rotate180(own_ksq);
+      opp_ksq = Square::rotate180(opp_ksq);
+    }
+
+    // 飛車の利きを評価
+    pos.pieces(kColor, kRook, kDragon).ForEach([&](Square from) {
+      Bitboard rook_target = pos.pieces() | ~rook_mask_bb(from);
+      Bitboard attacks = rook_attacks_bb(from, pos.pieces()) & rook_target;
+      assert(2 <= attacks.count() && attacks.count() <= 4);
+      if (kColor == kWhite) {
+        from = Square::rotate180(from);
+      }
+      while (attacks.any()) {
+        Square to = attacks.pop_first_one();
+        Piece threatened = pos.piece_on(to);
+        if (kColor == kWhite) {
+          to = Square::rotate180(to);
+          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
+        }
+        rook_control[kBlack][own_ksq][from][to] += delta;
+        rook_control[kWhite][opp_ksq][from][to] += delta;
+        rook_threat[opp_ksq][to][threatened] += delta;
+      }
+    });
+
+    // 角の利きを評価
+    Bitboard edge = file_bb(kFile1) | file_bb(kFile9) | rank_bb(kRank1) | rank_bb(kRank9);
+    Bitboard bishop_target = pos.pieces() | edge;
+    pos.pieces(kColor, kBishop, kHorse).ForEach([&](Square from) {
+      Bitboard attacks = bishop_attacks_bb(from, pos.pieces()) & bishop_target;
+      assert(1 <= attacks.count() && attacks.count() <= 4);
+      if (kColor == kWhite) {
+        from = Square::rotate180(from);
+      }
+      while (attacks.any()) {
+        Square to = attacks.pop_first_one();
+        Piece threatened = pos.piece_on(to);
+        if (kColor == kWhite) {
+          to = Square::rotate180(to);
+          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
+        }
+        bishop_control[kBlack][own_ksq][from][to] += delta;
+        bishop_control[kWhite][opp_ksq][from][to] += delta;
+        bishop_threat[opp_ksq][to][threatened] += delta;
+      }
+    });
+
+    // 香車の利きを評価
+    Bitboard lance_target = pos.pieces() | rank_bb(relative_rank(kColor, kRank1));
+    pos.pieces(kColor, kLance).ForEach([&](Square from) {
+      Bitboard attacks = lance_attacks_bb(from, pos.pieces(), kColor) & lance_target;
+      if (attacks.any()) {
+        assert(attacks.count() == 1);
+        Square to = attacks.first_one();
+        Piece threatened = pos.piece_on(to);
+        if (kColor == kWhite) {
+          from = Square::rotate180(from);
+          to = Square::rotate180(to);
+          if (threatened != kNoPiece) threatened = threatened.opponent_piece();
+        }
+        lance_control[kBlack][own_ksq][from][to] += delta;
+        lance_control[kWhite][opp_ksq][from][to] += delta;
+        lance_threat[opp_ksq][to][threatened] += delta;
+      }
+    });
+  }
+
+  /**
+   * 勾配ベクトルをdelta分だけ更新します.
+   */
+  void Update(const Position& pos, const PsqList& list, const float delta,
+              const float progress) {
+    const Color stm = pos.side_to_move();
+    const Square bk = pos.king_square(kBlack);
+    const Square wk = Square::rotate180(pos.king_square(kWhite));
+
+    PackedWeight coefficient3x1 = GetProgressCoefficient3x1(progress);
+    PackedWeight coefficient2x2 = GetProgressCoefficient2x2(progress, stm);
+    PackedWeight delta3x1 = coefficient3x1 * delta;
+    PackedWeight delta2x2 = coefficient2x2 * delta;
+
+    // 1. ２駒の関係
+    for (const PsqPair* i = list.begin(); i != list.end(); ++i) {
+      // a. KP（KPは、序盤・中盤・終盤と３通りに分かれている）
+      king_piece[bk][i->black()] += delta3x1; // 加算
+      king_piece[wk][i->white()] -= delta3x1; // 減算
+      // b. PP（PPは、序盤・終盤 * 手番で、2*2=4通りに分かれている）
+      for (const PsqPair* j = list.begin(); j <= i; ++j) {
+        two_pieces[i->black()][j->black()] += delta2x2;
+      }
+    }
+
+    // 2. 各マスの利き
+    UpdateControl(pos, delta2x2);
+
+    // 3. 玉の安全度
+    UpdateKingSafety<kBlack>(pos, delta2x2);
+    UpdateKingSafety<kWhite>(pos, FlipWeights2x2(delta2x2));
+
+    // 4. 飛車・角の利き
+    UpdateSlidingPieces<kBlack>(pos, delta2x2);
+    UpdateSlidingPieces<kWhite>(pos, FlipWeights2x2(delta2x2));
+
+    // 5. 手番
+    // 注：手番は、EvalDetail::ComputeFinalScore()に合わせるため、0.5を掛ける。
+    tempo += (stm == kBlack ? 0.5f : -0.5f) * delta3x1;
+  }
+
+  //
+  // 1. ２駒の位置関係
+  //
+  /** 玉と玉以外の駒の位置関係 [玉の位置][玉以外の駒の種類及び位置] */
+  ArrayMap<PackedWeight, Square, PsqIndex> king_piece;
+  /** 玉を除く２駒の位置関係 [駒１の種類及び位置][駒２の種類及び位置] */
+  ArrayMap<PackedWeight, PsqIndex, PsqIndex> two_pieces;
+
+  //
+  // 2. 各マスごとの利き
+  //
+  /** 各マスの利き [先手玉か後手玉か][玉の位置][マスの位置、駒の種類、先手の利き数、後手の利き数] */
+  ArrayMap<PackedWeight, Color, Square, PsqControlIndex> controls;
+
+  //
+  // 3. 玉の安全度
+  //
+  /** 玉の安全度 [相手の持ち駒][玉から見た方向][そのマスにある駒][攻め方の利き数][受け方の利き数] */
+  ArrayMap<Array<PackedWeight, 4, 4>, HandSet, Direction, Piece> king_safety;
+
+  //
+  // 4. 飛車・角・香車の利き
+  //
+  /** 飛車の利き [先手玉か後手玉か][玉の位置][飛車の位置][飛車の利きが届いている位置] */
+  ArrayMap<PackedWeight, Color, Square, Square, Square> rook_control;
+  /** 角の利き [先手玉か後手玉か][玉の位置][角の位置][角の利きが届いている位置] */
+  ArrayMap<PackedWeight, Color, Square, Square, Square> bishop_control;
+  /** 香車の利き [先手玉か後手玉か][玉の位置][香車の位置][香車の利きが届いている位置] */
+  ArrayMap<PackedWeight, Color, Square, Square, Square> lance_control;
+  /** 飛車の利きが付いている駒　[相手玉の位置][飛車が利きをつけている駒の位置][飛車が利きをつけている駒] */
+  ArrayMap<PackedWeight, Square, Square, Piece> rook_threat;
+  /** 角の利きが付いている駒　[相手玉の位置][角が利きをつけている駒の位置][角が利きをつけている駒] */
+  ArrayMap<PackedWeight, Square, Square, Piece> bishop_threat;
+  /** 香車の利きが付いている駒　[相手玉の位置][香車が利きをつけている駒の位置][香車が利きをつけている駒] */
+  ArrayMap<PackedWeight, Square, Square, Piece> lance_threat;
+
+  //
+  // 5. 手番
+  //
+  /** 手番 */
+  PackedWeight tempo;
+
+ private:
+  /**
+   * 重みを、先後反転します（序盤・中盤・終盤と３つに分かれている場合）.
+   *
+   * 進行度計算用の重みについては、先後反転されないことに注意してください。
+   */
+  static PackedWeight FlipWeights3x1(PackedWeight s) {
+    float opening     = -s[0]; // 序盤
+    float middle_game = -s[1]; // 中盤
+    float end_game    = -s[2]; // 終盤
+    float progress    = s[3];  // 進行度計算用の重み
+    return PackedWeight(opening, middle_game, end_game, progress);
+  }
+
+  /**
+   * 重みを先後反転します（序盤・終盤*手番に分かれていて、2*2=4通りある場合）.
+   *
+   * 手番用の重みについては、先後反転されないことに注意してください。
+   */
+  static PackedWeight FlipWeights2x2(PackedWeight s) {
+    float opening        = -s[0]; // 序盤
+    float opening_tempo  = s[1];  // 手番（序盤用）
+    float end_game       = -s[2]; // 終盤
+    float end_game_tempo = s[3];  // 手番（終盤用）
+    return PackedWeight(opening, opening_tempo, end_game, end_game_tempo);
   }
 
   /**
    * 進行度に応じて変化する係数を返します（重みが序盤・中盤・終盤と３つに分かれている場合）.
    */
-  static PackedWeight GetProgressCoefficient3x1(double progress) {
-    double opening, middle_game, end_game;
-    if (progress < 0.5) {
-      opening     = -2.0 * progress + 1.0; // 序盤
-      middle_game = +2.0 * progress;       // 中盤
-      end_game    =  0.0;                  // 終盤
+  static PackedWeight GetProgressCoefficient3x1(float progress) {
+    float opening, middle_game, end_game;
+    if (progress < 0.5f) {
+      opening     = -2.0f * progress + 1.0f; // 序盤
+      middle_game = +2.0f * progress;        // 中盤
+      end_game    =  0.0f;                   // 終盤
     } else {
-      opening     =  0.0;                  // 序盤
-      middle_game = -2.0 * progress + 2.0; // 中盤
-      end_game    = +2.0 * progress - 1.0; // 終盤
+      opening     =  0.0f;                   // 序盤
+      middle_game = -2.0f * progress + 2.0f; // 中盤
+      end_game    = +2.0f * progress - 1.0f; // 終盤
     }
     // 注：４番目がゼロになっているのは、進行度を保存するために空けておく必要があるため
-    return PackedWeight(opening, middle_game, end_game, 0.0);
+    return PackedWeight(opening, middle_game, end_game, 0.0f);
   }
 
   /**
    * 進行度に応じて変化する係数を返します（重みが序盤・終盤*手番に分かれていて、2*2=4通りある場合）.
    */
-  static PackedWeight GetProgressCoefficient2x2(double progress,
+  static PackedWeight GetProgressCoefficient2x2(float progress,
                                                 Color side_to_move) {
-    double opening  = 1.0 - progress; // 序盤
-    double end_game = progress;       // 終盤
-    double tempo = side_to_move == kBlack ? 0.1 : -0.1;
+    float opening  = 1.0f - progress; // 序盤
+    float end_game = progress;        // 終盤
+    float tempo = side_to_move == kBlack ? 0.1f : -0.1f;
     return PackedWeight(opening, opening * tempo, end_game, end_game * tempo);
   }
 };

@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -107,16 +107,6 @@ class Node : public Position {
    */
   Key64 exclusion_key() const {
     return key() + Zobrist::exclusion();
-  }
-
-  /**
-   * 開始局面から現局面までの手数を返します.
-   *
-   * 開始局面の場合は、まだ何も手を指していないので、ゼロを返します.
-   */
-  int game_ply() const {
-    assert(!stack_.empty());
-    return stack_.back().plies_from_null;
   }
 
   /**

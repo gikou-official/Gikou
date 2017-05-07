@@ -1,6 +1,6 @@
 /*
  * 技巧 (Gikou), a USI shogi (Japanese chess) playing engine.
- * Copyright (C) 2016 Yosuke Demura
+ * Copyright (C) 2016-2017 Yosuke Demura
  * except where otherwise indicated.
  *
  * This program is free software: you can redistribute it and/or modify
@@ -69,8 +69,8 @@ class ThreadManager {
   uint64_t CountNodesSearchedByWorkerThreads() const;
   uint64_t CountNodesUnder(Move move) const;
   RootMove ParallelSearch(Node& node, Score draw_score,
-                          const UsiGoOptions& go_options,
-                          int multipv);
+                          const std::vector<RootMove>& root_moves,
+                          int multipv, int depth_limit, uint64_t nodes_limit);
  private:
   SharedData& shared_data_;
   TimeManager& time_manager_;
