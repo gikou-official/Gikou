@@ -298,10 +298,10 @@ UsiOptions::UsiOptions() {
   map_.emplace("USI_Hash", UsiOption(256, 1, 16384)); // from 1MB to 16GB
 
   // 先読みを有効にする場合はtrue
-  map_.emplace("USI_Ponder", UsiOption(false));
+  map_.emplace("USI_Ponder", UsiOption(true));
 
   // 探索に用いるスレッド数
-  map_.emplace("Threads", UsiOption(1, 1, kMaxSearchThreads));
+  map_.emplace("Threads", UsiOption(std::thread::hardware_concurrency(), 1, kMaxSearchThreads));
 
   // USI出力するPVの数
   map_.emplace("MultiPV", UsiOption(1, 1, Move::kMaxLegalMoves));
@@ -310,16 +310,16 @@ UsiOptions::UsiOptions() {
   map_.emplace("DrawScore", UsiOption(0, -200, 200));
 
   // 秒読み時の安全マージン（単位はミリ秒）
-  map_.emplace("ByoyomiMargin", UsiOption(0, 0, 10000));
+  map_.emplace("ByoyomiMargin", UsiOption(100, 0, 10000));
 
   // フィッシャールール時の安全マージン（単位はミリ秒）
-  map_.emplace("FischerMargin", UsiOption(0, 0, 60000));
+  map_.emplace("FischerMargin", UsiOption(12000, 0, 60000));
 
   // 切れ負け対局のときに、安全のために予備的に残しておく時間（単位は秒）
-  map_.emplace("SuddenDeathMargin", UsiOption(0, 0, 600));
+  map_.emplace("SuddenDeathMargin", UsiOption(60, 0, 600));
 
   // 最小思考時間（実際には、ここから安全マージンを引いた時間だけ思考する）（単位はミリ秒）
-  map_.emplace("MinThinkingTime", UsiOption(10, 10, 60000));
+  map_.emplace("MinThinkingTime", UsiOption(1000, 10, 60000));
 
   // 定跡を使うか否か（trueならば、定跡を用いる）
   map_.emplace("OwnBook", UsiOption(true));
