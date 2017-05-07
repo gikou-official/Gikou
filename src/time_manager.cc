@@ -146,16 +146,16 @@ bool TimeManager::EnoughTimeIsAvailableForNextIteration() const {
 
 void TimeManager::Run() {
   while (!stop_) {
-    // Step 1. 消費時間ベースの打ち切り
+    // Step 1. 最小思考時間を下回っているときは、打ち切りを行わない
+    if (expended_time() < time_control_->minimum_time()) {
+      goto sleep;
+    }
+
+    // Step 2. 消費時間ベースの打ち切り
     // 消費時間が最大思考時間を上回ったら思考を直ちに終了する（切れ負けを防ぐ）
     if (expended_time() >= time_control_->maximum_time()) {
       HandleTimeUpEvent();
       break;
-    }
-
-    // Step 2. 最小思考時間を下回っているときは、打ち切りを行わない
-    if (expended_time() < time_control_->minimum_time()) {
-      goto sleep;
     }
 
     // Step 3. 経過時間ベースの打ち切り
