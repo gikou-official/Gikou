@@ -340,7 +340,7 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
 
     Score score = kScoreNone;
 
-    for (pv_index_ = 0; pv_index_ < multipv_ && !shared_.signals.stop; ++pv_index_) {
+    for (pv_index_ = 0; pv_index_ < multipv_ && !shared_.signals.stop && !shared_.signals.limit_reached; ++pv_index_) {
 
       // Aspiration Windows
       Score half_window = Score(64);
@@ -364,8 +364,8 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
           shared_.hash_table.InsertMoves(node, root_moves_.at(i).pv);
         }
 
-        // USIのstopコマンドが来ていたら終了する
-        if (shared_.signals.stop) {
+        // USIのstopコマンドを受信するか、ノード数・深さの制限に達したら、探索を打ち切る
+        if (shared_.signals.stop || shared_.signals.limit_reached) {
           break;
         }
 
@@ -404,8 +404,8 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
     uint64_t nodes = num_nodes_searched()
                    + thread_manager.CountNodesSearchedByWorkerThreads();
 
-    // USIのstopコマンドが来ていたら終了する
-    if (shared_.signals.stop) {
+    // USIのstopコマンドを受信するか、ノード数・深さの制限に達したら、探索を打ち切る
+    if (shared_.signals.stop || shared_.signals.limit_reached) {
       if (is_master_thread()) {
         SendUsiInfo(node, iteration, elapsed_time, nodes);
       }
@@ -428,7 +428,7 @@ void Search::IterativeDeepening(Node& node, ThreadManager& thread_manager) {
 
     // 深さの上限 or ノード数の上限に達したら、そこで終了する
     if (iteration >= depth_limit_ || nodes >= nodes_limit_) {
-      shared_.signals.stop = true; // ワーカースレッドを停止する
+      shared_.signals.limit_reached = true; // ワーカースレッドを停止する
       break;
     }
 
@@ -516,10 +516,13 @@ Score Search::MainSearch(Node& node, Score alpha, Score beta, const Depth depth,
   (ss+2)->killers[0] = (ss+2)->killers[1] = kMoveNone;
 
   if (!kIsRoot) {
-    // 最大手数に到達したら、探索を打ち切る
-    if (shared_.signals.stop) {
+    // USIのstopコマンドを受信するか、ノード数・深さの制限に達したら、探索を打ち切る
+    if (shared_.signals.stop || shared_.signals.limit_reached) {
       return kScoreDraw;
-    } else if (ply >= kMaxPly) {
+    }
+
+    // 最大手数に到達したら、探索を打ち切る
+    if (ply >= kMaxPly) {
       return !in_check ? node.Evaluate() : kScoreDraw;
     }
 
@@ -952,8 +955,8 @@ moves_loop: // 王手がかかっている場合は、ここからスタート�
     node.UnmakeMove(move);
     assert(-kScoreInfinite < score && score < kScoreInfinite);
 
-    // 探索を停止する指示が出ている場合は、ここで打ち切る
-    if (shared_.signals.stop) {
+    // USIのstopコマンドを受信するか、ノード数・深さの制限に達したら、探索を打ち切る
+    if (shared_.signals.stop || shared_.signals.limit_reached) {
       return kScoreZero;
     }
 
