@@ -172,6 +172,31 @@ make release
 
 注意：定跡データベースの作成は、Step 1.からStep 3.までを終えてから行ってください。
 
+#### Step 5. 強化学習の実施
+
+RootStrapによる強化学習を行う場合は、以下のコマンドを実行してください。
+強化学習後のパラメータを使って再度強化学習を行うというプロセスを何度か繰り返すことで、
+段階的に棋力が向上することが実験的に分かっています。
+強化学習を繰り返すには、以下のa.とb.のコマンドを繰り返し実行してみてください。
+
+```
+./release --generate-positions   # 教師局面の生成
+./release --learn-with-rootstrap # RootStrapによる強化学習
+```
+
+RootStrapと、対局の勝敗からのロジスティック回帰を組み合わせた強化学習の２つを併せて行うには、
+以下のコマンドを実行してください。
+なお、RootStrap単体で学習するよりも、ロジスティック回帰を組み合わせた方が、
+若干棋力が向上することが実験的に確かめられています。
+
+```
+./release --generate-positions    # 教師局面の生成
+./release --generate-games        # 教師用の自己対戦棋譜を生成
+./release --learn-with-regression # RootStrapとロジスティック回帰を組み合わせた強化学習
+```
+
+注意：強化学習は、少なくともStep 1.からStep 3.までを終えてから行ってください。
+
 ## 謝辞
 
 「技巧２」のデフォルトの定跡には、「[まふ定跡 ver11](https://github.com/mafu-opening-theory/Shogi_opening_theory)」が採用されています。
