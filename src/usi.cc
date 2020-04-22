@@ -129,6 +129,10 @@ void ReceiveCommands(CommandQueue* const queue, Thinking* const thinking) {
     // ここで保存されたコマンドは、ExecuteCommand()によって、1つずつ実行される
     queue->Push(command);
   }
+
+  // GUIが異常終了した場合は、終了処理を行い、メインループに終了を通知する
+  thinking->StopThinking();
+  queue->Push("quit");
 }
 
 void SetUsiOption(std::istream& is, UsiOptions* const usi_options) {
