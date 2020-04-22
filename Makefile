@@ -1,4 +1,4 @@
-# 
+#
 # 1. General Compiler Settings
 #
 CXX       = g++
@@ -17,6 +17,10 @@ endif
 ifeq ($(TARGET),release)      # Mac / Linuxの実行ファイル
 	sources  := $(shell ls src/*.cc)
 	CXXFLAGS += -O3 -DNDEBUG
+endif
+ifeq ($(TARGET),mac_static)      # Mac の静的リンク実行ファイル
+	sources  := $(shell ls src/*.cc)
+	CXXFLAGS += -O3 -DNDEBUG -static-libgcc
 endif
 ifeq ($(TARGET),cluster)      # 疎結合並列探索のマスター側（デバッグ用、assertマクロON）
 	sources  := $(shell ls src/*.cc)
@@ -59,9 +63,9 @@ directories  ?= $(sort $(dir $(objects))) bin
 #
 # 4. Public Targets
 #
-.PHONY: gikou release cluster consultation development profile test coverage run-coverage clean scaffold
+.PHONY: gikou release mac_static cluster consultation development profile test coverage run-coverage clean scaffold
 
-gikou release cluster consultation development profile test coverage:
+gikou release mac_static cluster consultation development profile test coverage:
 	$(MAKE) TARGET=$@ executable
 
 run-coverage: coverage
@@ -79,7 +83,7 @@ scaffold:
 .PHONY: executable
 executable: $(directories) $(objects)
 	$(CXX) $(CXXFLAGS) -o $(output_file) $(objects) $(LIBRARIES)
-	
+
 $(directories):
 	mkdir -p $@
 
